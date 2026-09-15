@@ -1,0 +1,4 @@
+{% if widget.is_initial %}Текущее вложение доступно по ссылке «Скачать вложение» ниже.
+{% if not widget.required %}<input type="checkbox" name="{{ widget.checkbox_name }}" id="{{ widget.checkbox_id }}"{% if widget.attrs.disabled %} disabled{% endif %}{% if widget.checked %} checked{% endif %}>
+<label for="{{ widget.checkbox_id }}">Удалить ссылку на вложение</label>{% endif %}<br>Заменить: {% endif %}
+<input type="{{ widget.type }}" name="{{ widget.name }}"{% include "django/forms/widgets/attrs.html" %}>
