@@ -42,7 +42,6 @@ class Task(models.Model):
     title = models.CharField("Название для учителя", max_length=200)
     question = models.TextField("Условие", blank=True)
     answer = models.CharField("Эталон короткого ответа", max_length=500, blank=True)
-    attachment = models.FileField("Вложение", upload_to=attachment_path, max_length=500, blank=True)
     is_active = models.BooleanField("Активно", default=False)
     order = models.PositiveIntegerField("Порядок", default=0)
     created_at = models.DateTimeField("Создано", auto_now_add=True)
@@ -66,6 +65,23 @@ class Task(models.Model):
                 errors["answer"] = "Для активации заполните эталон ответа."
             if errors:
                 raise ValidationError(errors)
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+
+class TaskAttachment(models.Model):
+    task = models.ForeignKey(Task, on_delete=models.CASCADE, related_name="attachments", verbose_name="Задание")
+    file = models.FileField("Файл", upload_to=attachment_path, max_length=500)
+
+    class Meta:
+        verbose_name = "Вложение"
+        verbose_name_plural = "Вложения"
+        ordering = ["pk"]
+
+    def __str__(self):
+        return Path(self.file.name).name
 
     def save(self, *args, **kwargs):
         self.full_clean()

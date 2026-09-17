@@ -9,7 +9,7 @@ from django.shortcuts import get_object_or_404
 from django.urls import path, reverse
 from django.utils.html import format_html
 
-from .models import Course, Task, Topic
+from .models import Course, Task, TaskAttachment, Topic
 
 
 class AttachmentWidget(forms.ClearableFileInput):
@@ -28,7 +28,43 @@ class TaskForm(forms.ModelForm):
     class Meta:
         model = Task
         fields = "__all__"
-        widgets = {"attachment": AttachmentWidget()}
+
+
+
+class AttachmentForm(forms.ModelForm):
+    class Meta:
+        model = TaskAttachment
+        fields = ("file",)
+        widgets = {"file": AttachmentWidget()}
+
+
+class AttachmentInline(admin.TabularInline):
+    model = TaskAttachment
+    form = AttachmentForm
+    extra = 1
+    fields = ("file", "download_link")
+    readonly_fields = ("download_link",)
+
+    def has_view_permission(self, request, obj=None):
+        return request.user.has_perm("materials.view_task")
+
+    def has_add_permission(self, request, obj=None):
+        permission = "change_task" if obj else "add_task"
+        return request.user.has_perm(f"materials.{permission}")
+
+    def has_change_permission(self, request, obj=None):
+        return request.user.has_perm("materials.change_task")
+
+    def has_delete_permission(self, request, obj=None):
+        return request.user.has_perm("materials.change_task")
+
+    @admin.display(description="Скачать")
+    def download_link(self, obj):
+        if not obj or not obj.pk:
+            return "Сначала сохраните задание"
+        return format_html('<a href="{}">Скачать вложение: {}</a>',
+                           reverse("admin:materials_task_attachment", args=[obj.task_id, obj.pk]),
+                           Path(obj.file.name).name)
 
 
 @admin.register(Course)
@@ -51,21 +87,15 @@ class TaskAdmin(admin.ModelAdmin):
     list_filter = ("topic__course", "topic", "is_active")
     search_fields = ("title", "question")
     list_select_related = ("topic__course",)
-    readonly_fields = ("download_link", "created_at", "updated_at")
-    fields = ("topic", "title", "question", "answer", "attachment", "download_link",
+    inlines = (AttachmentInline,)
+    readonly_fields = ("created_at", "updated_at")
+    fields = ("topic", "title", "question", "answer",
               "is_active", "order", "created_at", "updated_at")
     actions = ("deactivate",)
 
     @admin.display(description="Курс", ordering="topic__course__title")
     def course(self, obj):
         return obj.topic.course
-
-    @admin.display(description="Текущее вложение")
-    def download_link(self, obj):
-        if not obj or not obj.pk or not obj.attachment:
-            return "Нет вложения"
-        return format_html('<a href="{}">Скачать вложение</a>',
-                           reverse("admin:materials_task_attachment", args=[obj.pk]))
 
     def has_delete_permission(self, request, obj=None):
         return False
@@ -80,19 +110,18 @@ class TaskAdmin(admin.ModelAdmin):
         self.message_user(request, "Выбранные задания деактивированы.", messages.SUCCESS)
 
     def get_urls(self):
-        return [path("<int:task_id>/attachment/", self.admin_site.admin_view(self.download_attachment),
+        return [path("<int:task_id>/attachments/<int:attachment_id>/", self.admin_site.admin_view(self.download_attachment),
                      name="materials_task_attachment")] + super().get_urls()
 
-    def download_attachment(self, request, task_id):
+    def download_attachment(self, request, task_id, attachment_id):
         if not request.user.has_perm("materials.view_task"):
             raise PermissionDenied
         task = get_object_or_404(Task, pk=task_id)
         if not self.has_view_permission(request, task):
             raise PermissionDenied
-        if not task.attachment:
-            return HttpResponseNotFound("У задания нет вложения.", content_type="text/plain; charset=utf-8")
+        attachment = get_object_or_404(TaskAttachment, pk=attachment_id, task=task)
         try:
-            file = task.attachment.open("rb")
+            file = attachment.file.open("rb")
         except FileNotFoundError:
             return HttpResponseNotFound("Файл вложения не найден.", content_type="text/plain; charset=utf-8")
-        return FileResponse(file, as_attachment=True, filename=Path(task.attachment.name).name)
+        return FileResponse(file, as_attachment=True, filename=Path(attachment.file.name).name)

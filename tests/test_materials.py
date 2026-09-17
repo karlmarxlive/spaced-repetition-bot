@@ -6,11 +6,13 @@ from django.contrib.auth.models import Permission
 from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db.models.deletion import ProtectedError
-from django.test import TestCase, override_settings
+from django.test import TestCase, TransactionTestCase, override_settings
+from django.db import connection
+from django.db.migrations.executor import MigrationExecutor
 from django.urls import reverse
 
 from modules.materials.admin import TaskForm
-from modules.materials.models import Course, Task, Topic
+from modules.materials.models import Course, Task, TaskAttachment, Topic
 
 
 class MaterialsTests(TestCase):
@@ -88,11 +90,12 @@ class AdminTests(TestCase):
         self.topic = Topic.objects.create(course=self.course, title="Тема")
         self.task = Task.objects.create(topic=self.topic, title="Черновик")
         self.change_url = reverse("admin:materials_task_change", args=[self.task.pk])
-        self.download_url = reverse("admin:materials_task_attachment", args=[self.task.pk])
+        self.download_url = reverse("admin:materials_task_attachment", args=[self.task.pk, 99999])
 
     def data(self, **changes):
         return {"topic": self.topic.pk, "title": "Правка", "question": "Условие",
-                "answer": " 001 ", "order": 0, "is_active": "on", **changes}
+                "answer": " 001 ", "order": 0, "is_active": "on",
+                "attachments-TOTAL_FORMS": 0, "attachments-INITIAL_FORMS": 0, **changes}
 
     def upload(self, content=b"first"):
         return SimpleUploadedFile("example.txt", content, content_type="text/plain")
@@ -111,11 +114,11 @@ class AdminTests(TestCase):
         self.assertContains(self.client.get(reverse("admin:materials_task_changelist")), "Правка")
 
     def test_invalid_activation_with_attachment(self):
-        response = self.client.post(self.change_url, self.data(question="  ", attachment=self.upload()))
+        response = self.client.post(self.change_url, self.data(question="  ", **{"attachments-TOTAL_FORMS": 1, "attachments-0-file": self.upload()}))
         self.assertContains(response, "Для активации заполните текст условия.")
         self.task.refresh_from_db()
         self.assertFalse(self.task.is_active)
-        self.assertFalse(self.task.attachment)
+        self.assertFalse(self.task.attachments.exists())
 
     def test_deactivate_and_no_admin_delete(self):
         self.client.post(self.change_url, self.data())
@@ -133,45 +136,45 @@ class AdminTests(TestCase):
                          {"action": "delete_selected", "_selected_action": [self.task.pk], "post": "yes"})
         self.assertTrue(Task.objects.filter(pk=self.task.pk).exists())
 
-    def test_upload_replace_download_clear_and_persistence(self):
-        self.assertEqual(self.client.post(self.change_url, self.data(attachment=self.upload())).status_code, 302)
-        self.task.refresh_from_db()
-        old_path = Path(self.task.attachment.path)
-        old_name = self.task.attachment.name
+    def test_multiple_upload_replace_remove_and_download(self):
+        data = self.data(**{"attachments-TOTAL_FORMS": 2,
+                           "attachments-0-file": self.upload(b"first"),
+                           "attachments-1-file": self.upload(b"second")})
+        self.assertEqual(self.client.post(self.change_url, data).status_code, 302)
+        a, b = self.task.attachments.all()
+        old_path = Path(a.file.path)
+        self.assertNotEqual(a.file.name, b.file.name)
         self.assertEqual(old_path.read_bytes(), b"first")
-        response = self.client.get(self.change_url)
-        self.assertContains(response, self.download_url)
-        self.assertNotContains(response, self.task.attachment.url)
-        # A fresh ORM instance and reopened file do not depend on the upload handle.
-        fresh = Task.objects.get(pk=self.task.pk)
-        with fresh.attachment.open("rb") as file:
-            self.assertEqual(file.read(), b"first")
-        self.assertEqual(self.client.post(self.change_url, self.data(attachment=self.upload(b"second"))).status_code, 302)
-        self.task.refresh_from_db()
-        self.assertNotEqual(self.task.attachment.name, old_name)
+        self.assertEqual(Path(b.file.path).read_bytes(), b"second")
+        for attachment, content in ((a, b"first"), (b, b"second")):
+            url = reverse("admin:materials_task_attachment", args=[self.task.pk, attachment.pk])
+            self.assertContains(self.client.get(self.change_url), url)
+            self.assertNotContains(self.client.get(self.change_url), attachment.file.url)
+            response = self.client.get(url)
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("attachment;", response["Content-Disposition"])
+            self.assertEqual(b"".join(response.streaming_content), content)
+            response.close()
+        data = self.data(**{"attachments-TOTAL_FORMS": 2, "attachments-INITIAL_FORMS": 2,
+                           "attachments-0-id": a.pk, "attachments-0-file": self.upload(b"replacement"),
+                           "attachments-1-id": b.pk, "attachments-1-DELETE": "on"})
+        self.assertEqual(self.client.post(self.change_url, data).status_code, 302)
+        a.refresh_from_db()
+        self.assertEqual(Path(a.file.path).read_bytes(), b"replacement")
         self.assertEqual(old_path.read_bytes(), b"first")
-        response = self.client.get(self.download_url)
-        self.assertEqual(response.status_code, 200)
-        self.assertIn("attachment;", response["Content-Disposition"])
-        self.assertEqual(b"".join(response.streaming_content), b"second")
-        response.close()
-        new_path = Path(self.task.attachment.path)
-        self.assertEqual(self.client.post(self.change_url, self.data(**{"attachment-clear": "on"})).status_code, 302)
-        self.task.refresh_from_db()
-        self.assertFalse(self.task.attachment)
-        self.assertTrue(new_path.exists())
-        self.assertEqual(self.client.get(self.download_url).status_code, 404)
+        self.assertTrue(Path(b.file.path).exists())
+        self.assertEqual(self.task.attachments.count(), 1)
+        self.assertEqual(self.client.get(reverse("admin:materials_task_attachment", args=[self.task.pk, b.pk])).status_code, 404)
 
-    def test_same_filenames_do_not_overwrite(self):
-        a = Task.objects.create(topic=self.topic, title="a", attachment=self.upload(b"a"))
-        b = Task.objects.create(topic=self.topic, title="b", attachment=self.upload(b"b"))
-        self.assertNotEqual(a.attachment.name, b.attachment.name)
-        self.assertEqual(Path(a.attachment.path).read_bytes(), b"a")
-        self.assertEqual(Path(b.attachment.path).read_bytes(), b"b")
+    def test_attachment_cannot_be_accessed_through_another_task(self):
+        other = Task.objects.create(topic=self.topic, title="Other")
+        attachment = TaskAttachment.objects.create(task=other, file=self.upload())
+        url = reverse("admin:materials_task_attachment", args=[self.task.pk, attachment.pk])
+        self.assertEqual(self.client.get(url).status_code, 404)
 
     def test_download_permissions(self):
-        self.task.attachment = self.upload()
-        self.task.save()
+        attachment = TaskAttachment.objects.create(task=self.task, file=self.upload())
+        self.download_url = reverse("admin:materials_task_attachment", args=[self.task.pk, attachment.pk])
         self.client.logout()
         self.assertEqual(self.client.get(self.download_url).status_code, 302)
         user = get_user_model().objects.create_user("other", password="password")
@@ -189,9 +192,33 @@ class AdminTests(TestCase):
         self.assertEqual(self.client.get(self.download_url).status_code, 403)
 
     def test_missing_file_and_unknown_task(self):
-        self.assertContains(self.client.get(self.download_url), "У задания нет вложения.", status_code=404)
-        self.task.attachment = "tasks/missing.txt"
-        self.task.save()
+        self.assertEqual(self.client.get(self.download_url).status_code, 404)
+        attachment = TaskAttachment.objects.create(task=self.task, file="tasks/missing.txt")
+        self.download_url = reverse("admin:materials_task_attachment", args=[self.task.pk, attachment.pk])
         self.assertContains(self.client.get(self.download_url), "Файл вложения не найден.", status_code=404)
-        self.assertEqual(self.client.get(reverse("admin:materials_task_attachment", args=[99999])).status_code, 404)
+        self.assertEqual(self.client.get(reverse("admin:materials_task_attachment", args=[99999, 99999])).status_code, 404)
         self.assertEqual(self.client.get("/media/tasks/missing.txt").status_code, 404)
+
+
+class AttachmentMigrationTests(TransactionTestCase):
+    def test_existing_attachment_reference_is_preserved(self):
+        executor = MigrationExecutor(connection)
+        old_target = [("materials", "0001_initial")]
+        new_target = [("materials", "0002_remove_task_attachment_taskattachment")]
+        executor.migrate(old_target)
+        try:
+            apps = executor.loader.project_state(old_target).apps
+            course = apps.get_model("materials", "Course").objects.create(title="Course")
+            topic = apps.get_model("materials", "Topic").objects.create(course=course, title="Topic")
+            Task = apps.get_model("materials", "Task")
+            task = Task.objects.create(topic=topic, title="Existing", attachment="tasks/original.txt")
+            Task.objects.create(topic=topic, title="Empty")
+            executor = MigrationExecutor(connection)
+            executor.migrate(new_target)
+            apps = executor.loader.project_state(new_target).apps
+            attachments = apps.get_model("materials", "TaskAttachment").objects.all()
+            self.assertEqual(attachments.count(), 1)
+            self.assertEqual(attachments.get().task_id, task.pk)
+            self.assertEqual(attachments.get().file.name, "tasks/original.txt")
+        finally:
+            MigrationExecutor(connection).migrate(new_target)
