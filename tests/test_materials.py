@@ -221,4 +221,5 @@ class AttachmentMigrationTests(TransactionTestCase):
             self.assertEqual(attachments.get().task_id, task.pk)
             self.assertEqual(attachments.get().file.name, "tasks/original.txt")
         finally:
-            MigrationExecutor(connection).migrate(new_target)
+            executor = MigrationExecutor(connection)
+            executor.migrate(executor.loader.graph.leaf_nodes())

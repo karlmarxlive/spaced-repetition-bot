@@ -13,7 +13,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.methods import SendMessage
 from aiogram.types import Update
 from django.conf import settings
-from django.test import Client
+from django.test import Client, TransactionTestCase
 from django.utils import timezone
 
 from bot.__main__ import run
@@ -79,8 +79,8 @@ class FoundationTests(unittest.TestCase):
         self.assertNotIn("Traceback", result.stderr)
 
 
-class BotTests(unittest.IsolatedAsyncioTestCase):
-    async def test_start_routed_without_api_or_database(self):
+class StartRoutingTests(TransactionTestCase):
+    async def test_start_without_invitation_routed_offline(self):
         bot = Bot(TOKEN)
         dispatcher = Dispatcher()
         dispatcher.include_router(create_router())
@@ -100,6 +100,8 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(method.chat_id, 42)
         await bot.session.close()
 
+
+class BotTests(unittest.IsolatedAsyncioTestCase):
     async def test_session_closed_on_success_failure_and_cancel(self):
         for failure in (None, RuntimeError("failure"), asyncio.CancelledError()):
             with self.subTest(failure=type(failure).__name__):

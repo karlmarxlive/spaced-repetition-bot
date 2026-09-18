@@ -7,7 +7,6 @@ import os
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.aiohttp import AiohttpSession
 
-from bot.handlers import create_router
 from config.environment import load_environment
 from config.logging import LOGGING
 
@@ -23,6 +22,8 @@ async def run(token, check=False):
             logger.info("getMe: подключение к Telegram успешно")
             return
         dispatcher = Dispatcher()
+        from bot.handlers import create_router
+
         dispatcher.include_router(create_router())
         logger.info("Бот запущен: long polling; остановка — Ctrl+C")
         # asyncio.run handles Ctrl+C on Windows; aiogram handles POSIX signals.
@@ -40,6 +41,10 @@ def main():
         logger.error("Не задан TELEGRAM_BOT_TOKEN. Укажите токен в локальном .env.")
         return 1
     try:
+        os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
+        import django
+
+        django.setup()
         asyncio.run(run(token, check=args.check))
     except KeyboardInterrupt:
         logger.info("Остановка по Ctrl+C")

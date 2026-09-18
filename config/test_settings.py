@@ -3,7 +3,7 @@ import os
 from tempfile import TemporaryDirectory
 
 os.environ.update({
-    "TELEGRAM_BOT_TOKEN": "", "DJANGO_SECRET_KEY": "offline-test-secret",
+    "TELEGRAM_BOT_TOKEN": "", "TELEGRAM_BOT_USERNAME": "", "DJANGO_SECRET_KEY": "offline-test-secret",
     "DJANGO_DEBUG": "false", "DJANGO_ALLOWED_HOSTS": "testserver,localhost,127.0.0.1",
 })
 

@@ -1,0 +1,94 @@
+import re
+
+from aiogram.utils.deep_linking import create_deep_link
+from django import forms
+from django.conf import settings
+from django.contrib import admin, messages
+from django.utils.html import format_html
+
+from modules.materials.models import Topic
+from modules.users.models import Invitation, Student
+from modules.users.services import assign_topics, revoke_invitation
+
+
+class StudentForm(forms.ModelForm):
+    completed_topics = forms.ModelMultipleChoiceField(
+        label="Пройденные темы", queryset=Topic.objects.none(), required=False,
+        widget=forms.CheckboxSelectMultiple,
+        help_text="Снятие отметки отключает тему, сохраняя запись. Выдача заданий появится позже.",
+    )
+
+    class Meta:
+        model = Student
+        fields = ["display_name"]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if self.instance.pk:
+            self.fields["completed_topics"].queryset = Topic.objects.filter(course_id=self.instance.course_id)
+            self.initial["completed_topics"] = list(self.instance.topic_assignments.filter(
+                is_active=True).values_list("topic_id", flat=True))
+
+
+@admin.register(Student)
+class StudentAdmin(admin.ModelAdmin):
+    form = StudentForm
+    list_display = ["name", "telegram_id", "username", "course", "registered_at"]
+    list_filter = ["course"]
+    search_fields = ["display_name", "first_name", "last_name", "username", "=telegram_id"]
+    readonly_fields = ["telegram_id", "username", "first_name", "last_name", "course", "registered_at"]
+    fields = ["display_name", *readonly_fields, "completed_topics"]
+    list_select_related = ["course"]
+
+    @admin.display(description="Имя ученика")
+    def name(self, obj):
+        return str(obj)
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    def save_related(self, request, form, formsets, change):
+        super().save_related(request, form, formsets, change)
+        assign_topics(form.instance.pk, [topic.pk for topic in form.cleaned_data["completed_topics"]])
+
+
+@admin.register(Invitation)
+class InvitationAdmin(admin.ModelAdmin):
+    list_display = ["id", "course", "state", "note", "created_at", "used_at", "student"]
+    list_select_related = ["course", "student"]
+    list_filter = ["course", "is_revoked"]
+    readonly_fields = ["state", "link", "created_at", "used_at", "student"]
+    fields = ["course", "note", *readonly_fields]
+    actions = ["revoke"]
+
+    def get_readonly_fields(self, request, obj=None):
+        return [*self.readonly_fields, *(["course"] if obj else [])]
+
+    @admin.display(description="Состояние")
+    def state(self, obj):
+        return obj.status
+
+    @admin.display(description="Ссылка для ученика")
+    def link(self, obj):
+        username = settings.TELEGRAM_BOT_USERNAME
+        if not username:
+            return "Задайте TELEGRAM_BOT_USERNAME без @ в настройках и перезапустите панель."
+        if not re.fullmatch(r"[A-Za-z0-9_]{5,32}", username):
+            return "Проверьте TELEGRAM_BOT_USERNAME: имя без @, 5–32 латинских букв, цифр или _."
+        if not obj.pk:
+            return "Сохраните приглашение, чтобы получить ссылку."
+        if obj.used_at or obj.is_revoked:
+            return "Приглашение недоступно."
+        url = create_deep_link(username, "start", obj.token)
+        return format_html('<a href="{}">{}</a>', url, url)
+
+    @admin.action(description="Отозвать выбранные неиспользованные приглашения", permissions=["change"])
+    def revoke(self, request, queryset):
+        count = sum(revoke_invitation(pk) for pk in queryset.values_list("pk", flat=True))
+        self.message_user(request, f"Отозвано приглашений: {count}.", messages.SUCCESS)
+
+    def has_delete_permission(self, request, obj=None):
+        return False
