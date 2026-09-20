@@ -3,15 +3,15 @@ from pathlib import Path
 
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Permission
+from django.contrib import admin
 from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db.models.deletion import ProtectedError
-from django.test import TestCase, TransactionTestCase, override_settings
+from django.test import RequestFactory, TestCase, TransactionTestCase, override_settings
 from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
 from django.urls import reverse
 
-from modules.materials.admin import TaskForm
 from modules.materials.models import Course, Task, TaskAttachment, Topic
 
 
@@ -61,7 +61,10 @@ class MaterialsTests(TestCase):
         self.assertTrue(task.is_active)
 
     def test_form_trims_only_edges(self):
-        form = TaskForm(data={"topic": self.topic.pk, "title": "t", "question": " q ",
+        request = RequestFactory().get("/admin/")
+        request.user = get_user_model().objects.create_superuser("teacher", password="test")
+        form_class = admin.site._registry[Task].get_form(request)
+        form = form_class(data={"topic": self.topic.pk, "title": "t", "question": " q ",
                               "answer": "  001 Ab  C  ", "is_active": True, "order": 0})
         self.assertTrue(form.is_valid(), form.errors)
         task = form.save()
@@ -91,6 +94,15 @@ class AdminTests(TestCase):
         self.task = Task.objects.create(topic=self.topic, title="Черновик")
         self.change_url = reverse("admin:materials_task_change", args=[self.task.pk])
         self.download_url = reverse("admin:materials_task_attachment", args=[self.task.pk, 99999])
+
+    def test_topic_choices_load_courses_in_one_query(self):
+        for index in range(10):
+            Topic.objects.create(course=self.course, title=f"Topic {index}")
+        request = RequestFactory().get(self.change_url)
+        request.user = self.teacher
+        form = admin.site._registry[Task].get_form(request)(instance=self.task)
+        with self.assertNumQueries(1):
+            str(form["topic"])
 
     def data(self, **changes):
         return {"topic": self.topic.pk, "title": "Правка", "question": "Условие",
@@ -201,6 +213,38 @@ class AdminTests(TestCase):
 
 
 class AttachmentMigrationTests(TransactionTestCase):
+    def test_reverse_restores_single_attachment(self):
+        course = Course.objects.create(title="Course")
+        topic = Topic.objects.create(course=course, title="Topic")
+        task = Task.objects.create(topic=topic, title="Task")
+        TaskAttachment.objects.create(task=task, file="tasks/original.txt")
+        old_target = [("materials", "0001_initial")]
+        try:
+            executor = MigrationExecutor(connection)
+            executor.migrate(old_target)
+            old_task = executor.loader.project_state(old_target).apps.get_model("materials", "Task")
+            self.assertEqual(old_task.objects.get(pk=task.pk).attachment.name, "tasks/original.txt")
+        finally:
+            executor = MigrationExecutor(connection)
+            executor.migrate(executor.loader.graph.leaf_nodes())
+        self.assertEqual(TaskAttachment.objects.get(task_id=task.pk).file.name, "tasks/original.txt")
+
+    def test_reverse_rejects_multiple_attachments_without_data_loss(self):
+        course = Course.objects.create(title="Course")
+        topic = Topic.objects.create(course=course, title="Topic")
+        task = Task.objects.create(topic=topic, title="Task")
+        names = ["tasks/first.txt", "tasks/second.txt"]
+        for name in names:
+            TaskAttachment.objects.create(task=task, file=name)
+        try:
+            with self.assertRaisesRegex(RuntimeError, "несколько вложений"):
+                MigrationExecutor(connection).migrate([("materials", "0001_initial")])
+            self.assertEqual(list(TaskAttachment.objects.filter(task_id=task.pk).values_list("file", flat=True)), names)
+            self.assertTrue(Task.objects.filter(pk=task.pk).exists())
+        finally:
+            executor = MigrationExecutor(connection)
+            executor.migrate(executor.loader.graph.leaf_nodes())
+
     def test_existing_attachment_reference_is_preserved(self):
         executor = MigrationExecutor(connection)
         old_target = [("materials", "0001_initial")]

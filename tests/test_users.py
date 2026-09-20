@@ -3,7 +3,7 @@ from pathlib import Path
 import os
 import subprocess
 import sys
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, DEFAULT, patch
 
 from aiogram import Bot, Dispatcher
 from aiogram.filters import CommandObject
@@ -20,7 +20,7 @@ from django.utils import timezone
 
 from bot.handlers import REPLIES, create_router, start
 from modules.materials.models import Course, Topic
-from modules.users.admin import InvitationAdmin
+from modules.users.admin import InvitationAdmin, StudentForm
 from modules.users.models import Invitation, Student, StudentTopic
 from modules.users.services import assign_topics, register_student, revoke_invitation
 
@@ -144,6 +144,36 @@ class RegistrationTests(TestCase):
             self.assertEqual(self.register().status, "busy")
         self.assertEqual(self.register().status, "registered")
 
+    def test_identity_integrity_conflict_is_retried(self):
+        self.register()
+        try:
+            with transaction.atomic():
+                Student.objects.create(telegram_id=2**40, first_name="Duplicate", course=self.course)
+        except IntegrityError as error:
+            conflict = error
+        from modules.users.services import _register
+        with patch("modules.users.services._register", wraps=_register,
+                   side_effect=[conflict, DEFAULT]) as operation:
+            self.assertEqual(self.register().status, "existing")
+        self.assertEqual(operation.call_count, 2)
+
+    def test_unexpected_integrity_error_is_logged_and_not_retried(self):
+        error = IntegrityError(f"Unexpected constraint: {self.invitation.token}")
+        with patch("modules.users.services._register", side_effect=error) as operation:
+            with self.assertLogs("modules.users.services", level="ERROR") as logs:
+                with self.assertRaises(IntegrityError):
+                    self.register()
+        operation.assert_called_once()
+        self.assertNotIn(self.invitation.token, "\n".join(logs.output))
+        self.assertIn("IntegrityError", "\n".join(logs.output))
+        self.assertFalse(Student.objects.exists())
+
+    def test_non_lock_operational_error_is_not_retried(self):
+        with patch("modules.users.services._register", side_effect=OperationalError("no such table")) as operation:
+            with self.assertRaises(OperationalError):
+                self.register()
+        operation.assert_called_once()
+
     def test_tokens_are_random_url_safe_and_not_in_labels(self):
         other = Invitation.objects.create(course=self.course)
         self.assertNotEqual(other.token, self.invitation.token)
@@ -203,6 +233,40 @@ class UsersAdminTests(TestCase):
         self.foreign = Topic.objects.create(course=Course.objects.create(title="Другой"), title="Чужая")
         self.student = Student.objects.create(telegram_id=100, first_name="Пётр", course=self.course)
         self.url = reverse("admin:users_student_change", args=[self.student.pk])
+
+    def test_assigned_topic_course_change_is_rejected_in_model_and_admin(self):
+        assign_topics(self.student.pk, [self.topic.pk])
+        url = reverse("admin:materials_topic_change", args=[self.topic.pk])
+        for active in (True, False):
+            with self.subTest(active=active):
+                if not active:
+                    assign_topics(self.student.pk, [])
+                response = self.client.post(url, {"course": self.foreign.course_id, "title": "Moved",
+                                                 "order": 0, "_save": "1"})
+                self.assertEqual(response.status_code, 200)
+                self.assertIn("course", response.context["adminform"].form.errors)
+                self.topic.refresh_from_db()
+                self.assertEqual(self.topic.course_id, self.course.pk)
+                self.topic.course = self.foreign.course
+                with self.assertRaises(ValidationError):
+                    self.topic.save()
+                self.topic.refresh_from_db()
+                self.topic.title = "Renamed"
+                self.topic.save()
+                self.assertEqual(self.student.topic_assignments.get().is_active, active)
+
+    def test_unassigned_topic_can_change_course(self):
+        self.topic.course = self.foreign.course
+        self.topic.save()
+        self.topic.refresh_from_db()
+        self.assertEqual(self.topic.course_id, self.foreign.course_id)
+
+    def test_student_topic_choices_load_courses_in_one_query(self):
+        for index in range(10):
+            Topic.objects.create(course=self.course, title=f"Topic {index}")
+        form = StudentForm(instance=self.student)
+        with self.assertNumQueries(1):
+            str(form["completed_topics"])
 
     @override_settings(TELEGRAM_BOT_USERNAME="ExampleBot")
     def test_create_link_revoke_and_no_token_in_audit_log(self):

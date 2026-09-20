@@ -11,7 +11,7 @@ from django.db import connections
 
 from modules.materials.models import Course
 from modules.users.models import Invitation, Student
-from modules.users.services import register_student
+from modules.users.services import register_student, revoke_invitation
 
 
 def main():
@@ -71,6 +71,28 @@ def main():
         assert invitation.used_at is None
         assert not Student.objects.filter(telegram_id=5).exists()
         assert register_student(telegram_id=5, first_name="Test", payload=invitation.token).status == "registered"
+
+        # Revocation and registration must have exactly one winner.
+        invitation = Invitation.objects.create(course=course)
+        barrier = Barrier(2)
+
+        def claim_or_revoke(claim):
+            try:
+                barrier.wait(timeout=5)
+                if claim:
+                    return register_student(telegram_id=6, first_name="Test", payload=invitation.token)
+                return revoke_invitation(invitation.pk)
+            finally:
+                connections.close_all()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            registered, revoked = list(pool.map(claim_or_revoke, [True, False]))
+        invitation.refresh_from_db()
+        assert (registered.status, revoked) in {("registered", False), ("unavailable", True)}
+        assert invitation.is_revoked == revoked
+        assert (invitation.used_at is None) == revoked
+        assert (invitation.student_id is None) == revoked
+        assert Student.objects.filter(telegram_id=6).exists() == (not revoked)
         connections.close_all()
     print("SQLite races and lock recovery: OK")
 

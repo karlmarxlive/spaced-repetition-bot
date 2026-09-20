@@ -16,10 +16,10 @@ from django.conf import settings
 from django.test import Client, TransactionTestCase
 from django.utils import timezone
 
-from bot.__main__ import run
+from bot.__main__ import main, run
 from bot.handlers import START_TEXT, create_router
 from config.environment import BASE_DIR, env_bool, load_environment
-from config.logging import SafeFormatter
+from config.logging import SafeFormatter, log_failure
 
 TOKEN = "123456789:" + "a" * 35
 
@@ -77,6 +77,56 @@ class FoundationTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("Не задан TELEGRAM_BOT_TOKEN", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
+
+    def test_failure_diagnostics_include_location_but_no_exception_data(self):
+        secret = "private-invitation-payload"
+        with self.assertLogs("review.diagnostics", level="ERROR") as logs:
+            try:
+                raise RuntimeError(secret)
+            except RuntimeError as error:
+                log_failure(logging.getLogger("review.diagnostics"), "Failure", error)
+        output = "\n".join(logs.output)
+        self.assertIn("RuntimeError", output)
+        self.assertIn("test_foundation.py:", output)
+        self.assertNotIn(secret, output)
+
+    def test_configuration_failure_has_specific_diagnostics(self):
+        with patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": TOKEN}), \
+             patch.object(sys, "argv", ["bot"]), \
+             patch("bot.__main__.load_environment"), \
+             patch("bot.__main__.logging.config.dictConfig"), \
+             patch("django.setup", side_effect=RuntimeError("private-config")), \
+             self.assertLogs("bot", level="ERROR") as logs:
+            self.assertEqual(main(), 1)
+        output = "\n".join(logs.output)
+        self.assertIn("Ошибка настройки Django", output)
+        self.assertNotIn("private-config", output)
+        self.assertNotIn("сеть", output)
+
+    def test_runtime_failures_have_specific_diagnostics(self):
+        from aiogram.exceptions import TelegramNetworkError, TelegramUnauthorizedError
+        from aiogram.methods import GetMe
+        from aiogram.utils.token import TokenValidationError
+
+        cases = [
+            (TokenValidationError("private-data"), "Проверьте TELEGRAM_BOT_TOKEN"),
+            (TelegramUnauthorizedError(method=GetMe(), message="private-data"), "Проверьте TELEGRAM_BOT_TOKEN"),
+            (TelegramNetworkError(method=GetMe(), message="private-data"), "Проверьте сеть"),
+            (RuntimeError("private-data"), "Проверьте указанное место в коде"),
+        ]
+        for error, expected in cases:
+            with self.subTest(error=type(error).__name__), \
+                 patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": TOKEN}), \
+                 patch.object(sys, "argv", ["bot"]), \
+                 patch("bot.__main__.load_environment"), \
+                 patch("bot.__main__.logging.config.dictConfig"), \
+                 patch("django.setup"), \
+                 patch("bot.__main__.run", new_callable=AsyncMock, side_effect=error), \
+                 self.assertLogs("bot", level="ERROR") as logs:
+                self.assertEqual(main(), 1)
+            output = "\n".join(logs.output)
+            self.assertIn(expected, output)
+            self.assertNotIn("private-data", output)
 
 
 class StartRoutingTests(TransactionTestCase):

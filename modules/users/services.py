@@ -1,6 +1,8 @@
 """Synchronous application operations; no Telegram objects or network effects."""
 from dataclasses import dataclass
+import logging
 import re
+import sqlite3
 import time
 
 from django.core.exceptions import ValidationError
@@ -8,8 +10,18 @@ from django.db import IntegrityError, OperationalError, transaction
 from django.db.models import F
 from django.utils import timezone
 
+from config.logging import log_failure
 from modules.materials.models import Topic
 from modules.users.models import Invitation, Student, StudentTopic
+
+logger = logging.getLogger(__name__)
+
+
+def _is_identity_conflict(error):
+    cause = error.__cause__
+    return (isinstance(cause, sqlite3.IntegrityError)
+            and getattr(cause, "sqlite_errorname", None) == "SQLITE_CONSTRAINT_UNIQUE"
+            and str(cause) == "UNIQUE constraint failed: users_student.telegram_id")
 
 
 @dataclass(frozen=True)
@@ -35,9 +47,11 @@ def register_student(*, telegram_id, first_name, last_name="", username="", payl
             return _register(telegram_id, fields, payload)
         except InvitationUnavailable:
             return RegistrationResult("unavailable")
-        except IntegrityError:
-            # The entire attempt rolled back. Re-read on retry, including identity conflicts.
-            pass
+        except IntegrityError as error:
+            # Only an identity race can be resolved by re-reading the student.
+            if not _is_identity_conflict(error):
+                log_failure(logger, "Ошибка целостности данных при регистрации", error)
+                raise
         except OperationalError as error:
             if "locked" not in str(error).lower() and "busy" not in str(error).lower():
                 raise

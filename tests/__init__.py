@@ -2,11 +2,7 @@
 import os
 import socket
 
-os.environ.update({
-    "TELEGRAM_BOT_TOKEN": "", "DJANGO_SECRET_KEY": "offline-test-secret",
-    "DJANGO_DEBUG": "false", "DJANGO_ALLOWED_HOSTS": "testserver,localhost,127.0.0.1",
-    "DJANGO_SETTINGS_MODULE": "config.test_settings",
-})
+os.environ["DJANGO_SETTINGS_MODULE"] = "config.test_settings"
 
 def deny_network(*args, **kwargs):
     raise AssertionError("Network access is forbidden in offline tests")

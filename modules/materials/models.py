@@ -36,6 +36,17 @@ class Topic(models.Model):
     def __str__(self):
         return f"{self.course}: {self.title}"
 
+    def clean(self):
+        super().clean()
+        if self.pk:
+            original_course = type(self).objects.filter(pk=self.pk).values_list("course_id", flat=True).first()
+            if original_course != self.course_id and self.studenttopic_set.exists():
+                raise ValidationError({"course": "Нельзя менять курс темы, которая уже назначалась ученикам."})
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
 
 class Task(models.Model):
     topic = models.ForeignKey(Topic, on_delete=models.PROTECT, related_name="tasks", verbose_name="Тема")

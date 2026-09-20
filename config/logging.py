@@ -3,6 +3,14 @@
 import logging
 import os
 import re
+import traceback
+
+
+def log_failure(logger, message, error):
+    """Keep failure type and code locations, without exception text or local data."""
+    logger.error("%s (%s)\n%s", message, type(error).__name__,
+                 "".join(f"  {frame.filename}:{frame.lineno} in {frame.name}\n"
+                         for frame in traceback.extract_tb(error.__traceback__)))
 
 
 class SafeFormatter(logging.Formatter):

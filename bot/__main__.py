@@ -6,9 +6,11 @@ import os
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.exceptions import TelegramNetworkError, TelegramUnauthorizedError
+from aiogram.utils.token import TokenValidationError
 
 from config.environment import load_environment
-from config.logging import LOGGING
+from config.logging import LOGGING, log_failure
 
 logger = logging.getLogger("bot")
 
@@ -45,12 +47,21 @@ def main():
         import django
 
         django.setup()
+    except Exception as error:
+        log_failure(logger, "Ошибка настройки Django. Проверьте конфигурацию проекта", error)
+        return 1
+    try:
         asyncio.run(run(token, check=args.check))
     except KeyboardInterrupt:
         logger.info("Остановка по Ctrl+C")
+    except (TokenValidationError, TelegramUnauthorizedError) as error:
+        log_failure(logger, "Telegram отклонил токен. Проверьте TELEGRAM_BOT_TOKEN", error)
+        return 1
+    except TelegramNetworkError as error:
+        log_failure(logger, "Ошибка соединения с Telegram. Проверьте сеть", error)
+        return 1
     except Exception as error:
-        # No external exception text: it may contain a request URL or credentials.
-        logger.error("Ошибка запуска/работы бота (%s). Проверьте токен и сеть.", type(error).__name__)
+        log_failure(logger, "Ошибка работы бота. Проверьте указанное место в коде", error)
         return 1
     finally:
         logger.info("Бот остановлен; сетевая сессия закрыта")

@@ -24,13 +24,6 @@ class AttachmentWidget(forms.ClearableFileInput):
     template_name = "materials/attachment_widget.html"
 
 
-class TaskForm(forms.ModelForm):
-    class Meta:
-        model = Task
-        fields = "__all__"
-
-
-
 class AttachmentForm(forms.ModelForm):
     class Meta:
         model = TaskAttachment
@@ -82,7 +75,6 @@ class TopicAdmin(admin.ModelAdmin):
 
 @admin.register(Task)
 class TaskAdmin(admin.ModelAdmin):
-    form = TaskForm
     list_display = ("title", "topic", "course", "is_active", "order")
     list_filter = ("topic__course", "topic", "is_active")
     search_fields = ("title", "question")
@@ -92,6 +84,11 @@ class TaskAdmin(admin.ModelAdmin):
     fields = ("topic", "title", "question", "answer",
               "is_active", "order", "created_at", "updated_at")
     actions = ("deactivate",)
+
+    def formfield_for_foreignkey(self, db_field, request, **kwargs):
+        if db_field.name == "topic":
+            kwargs["queryset"] = Topic.objects.select_related("course")
+        return super().formfield_for_foreignkey(db_field, request, **kwargs)
 
     @admin.display(description="Курс", ordering="topic__course__title")
     def course(self, obj):
@@ -117,8 +114,6 @@ class TaskAdmin(admin.ModelAdmin):
         if not request.user.has_perm("materials.view_task"):
             raise PermissionDenied
         task = get_object_or_404(Task, pk=task_id)
-        if not self.has_view_permission(request, task):
-            raise PermissionDenied
         attachment = get_object_or_404(TaskAttachment, pk=attachment_id, task=task)
         try:
             file = attachment.file.open("rb")

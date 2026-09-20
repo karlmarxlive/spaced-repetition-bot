@@ -25,7 +25,8 @@ class StudentForm(forms.ModelForm):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         if self.instance.pk:
-            self.fields["completed_topics"].queryset = Topic.objects.filter(course_id=self.instance.course_id)
+            self.fields["completed_topics"].queryset = Topic.objects.filter(
+                course_id=self.instance.course_id).select_related("course")
             self.initial["completed_topics"] = list(self.instance.topic_assignments.filter(
                 is_active=True).values_list("topic_id", flat=True))
 
