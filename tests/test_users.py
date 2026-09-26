@@ -79,7 +79,7 @@ class RegistrationTests(TestCase):
         student.display_name = "Имя учителя"
         student.save()
         topic = Topic.objects.create(course=self.course, title="Логика")
-        assign_topics(student.pk, [topic.pk])
+        assign_topics(student.pk, [topic.pk], now=timezone.now())
         other = Invitation.objects.create(course=Course.objects.create(title="Другой курс"))
         for payload in (self.invitation.token, other.token, None, "invalid payload"):
             result = self.register(payload=payload, first_name="Новое", last_name=None, username=None)
@@ -190,36 +190,35 @@ class AssignmentTests(TestCase):
 
     def test_add_disable_reenable_unchanged_and_independent_students(self):
         other = Student.objects.create(telegram_id=2, first_name="Other", course=self.course)
-        assign_topics(self.student.pk, [self.topic.pk])
+        assign_topics(self.student.pk, [self.topic.pk], now=timezone.now())
         row = self.student.topic_assignments.get()
         first_time = row.activated_at
-        assign_topics(self.student.pk, [self.topic.pk])
+        assign_topics(self.student.pk, [self.topic.pk], now=timezone.now())
         row.refresh_from_db()
         self.assertEqual(row.activated_at, first_time)
-        assign_topics(other.pk, [self.topic.pk])
-        assign_topics(self.student.pk, [])
+        assign_topics(other.pk, [self.topic.pk], now=timezone.now())
+        assign_topics(self.student.pk, [], now=timezone.now())
         row.refresh_from_db()
         self.assertFalse(row.is_active)
         self.assertEqual(row.activated_at, first_time)
         self.assertTrue(other.topic_assignments.get().is_active)
-        with patch("modules.users.services.timezone.now", return_value=first_time + timedelta(days=1)):
-            assign_topics(self.student.pk, [self.topic.pk])
+        assign_topics(self.student.pk, [self.topic.pk], now=first_time + timedelta(days=1))
         row.refresh_from_db()
         self.assertTrue(row.is_active)
         self.assertEqual(row.activated_at, first_time + timedelta(days=1))
         self.assertEqual(self.student.topic_assignments.get().pk, row.pk)
 
     def test_wrong_course_and_unknown_topic_are_rejected_atomically(self):
-        assign_topics(self.student.pk, [self.topic.pk])
+        assign_topics(self.student.pk, [self.topic.pk], now=timezone.now())
         for ids in ([self.foreign.pk], [999999], [self.topic.pk, self.foreign.pk]):
             with self.assertRaises(ValidationError):
-                assign_topics(self.student.pk, ids)
+                assign_topics(self.student.pk, ids, now=timezone.now())
         self.assertTrue(self.student.topic_assignments.get().is_active)
         with self.assertRaises(ValidationError):
             StudentTopic(student=self.student, topic=self.foreign, activated_at=timezone.now()).full_clean()
 
     def test_pair_unique_in_database(self):
-        assign_topics(self.student.pk, [self.topic.pk])
+        assign_topics(self.student.pk, [self.topic.pk], now=timezone.now())
         with self.assertRaises(IntegrityError), transaction.atomic():
             StudentTopic.objects.create(student=self.student, topic=self.topic, activated_at=timezone.now())
 
@@ -235,12 +234,12 @@ class UsersAdminTests(TestCase):
         self.url = reverse("admin:users_student_change", args=[self.student.pk])
 
     def test_assigned_topic_course_change_is_rejected_in_model_and_admin(self):
-        assign_topics(self.student.pk, [self.topic.pk])
+        assign_topics(self.student.pk, [self.topic.pk], now=timezone.now())
         url = reverse("admin:materials_topic_change", args=[self.topic.pk])
         for active in (True, False):
             with self.subTest(active=active):
                 if not active:
-                    assign_topics(self.student.pk, [])
+                    assign_topics(self.student.pk, [], now=timezone.now())
                 response = self.client.post(url, {"course": self.foreign.course_id, "title": "Moved",
                                                  "order": 0, "_save": "1"})
                 self.assertEqual(response.status_code, 200)

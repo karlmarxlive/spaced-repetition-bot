@@ -13,6 +13,9 @@ from django.utils import timezone
 from config.logging import log_failure
 from modules.materials.models import Topic
 from modules.users.models import Invitation, Student, StudentTopic
+from modules.repetitions.scheduling import moscow_date
+from modules.repetitions.services import _initialize_progress, require_progress
+from modules.study_sessions.lifecycle import cancel_assignments, reset_cursor
 
 logger = logging.getLogger(__name__)
 
@@ -87,9 +90,13 @@ def revoke_invitation(invitation_id):
 
 
 @transaction.atomic
-def assign_topics(student_id, topic_ids):
+def assign_topics(student_id, topic_ids, *, now):
     """Replace active selections while preserving rows and unchanged timestamps."""
-    selected = set(topic_ids)
+    moscow_date(now)
+    selected_ids = list(topic_ids)
+    if any(type(item) is not int or item <= 0 for item in selected_ids):
+        raise ValidationError("ID темы должен быть положительным целым числом.")
+    selected = set(selected_ids)
     # Serialize assignments for this student; also acquire SQLite's writer lock.
     Student.objects.filter(pk=student_id).update(display_name=F("display_name"))
     student = Student.objects.get(pk=student_id)
@@ -97,11 +104,16 @@ def assign_topics(student_id, topic_ids):
     if selected != allowed:
         raise ValidationError("Можно назначить только темы курса ученика.")
     assignments = {item.topic_id: item for item in StudentTopic.objects.filter(student=student)}
-    now = timezone.now()
+    require_progress(StudentTopic.objects.filter(student=student))
     for topic_id in selected:
         existing = assignments.get(topic_id)
         if existing is None:
-            StudentTopic.objects.create(student=student, topic_id=topic_id, activated_at=now)
+            existing = StudentTopic.objects.create(student=student, topic_id=topic_id, activated_at=now)
+            _initialize_progress(existing, now=now, create=True)
         elif not existing.is_active:
             StudentTopic.objects.filter(pk=existing.pk).update(is_active=True, activated_at=now)
-    StudentTopic.objects.filter(student=student, is_active=True).exclude(topic_id__in=selected).update(is_active=False)
+            _initialize_progress(existing, now=now, create=False)
+            reset_cursor(existing.pk)
+    disabled = StudentTopic.objects.filter(student=student, is_active=True).exclude(topic_id__in=selected)
+    cancel_assignments(list(disabled.values_list("pk", flat=True)), now=now)
+    disabled.update(is_active=False)

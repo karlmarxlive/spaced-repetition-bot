@@ -21,6 +21,8 @@ INSTALLED_APPS = [
     "django.contrib.sessions", "django.contrib.messages", "django.contrib.staticfiles",
     "modules.materials.apps.MaterialsConfig",
     "modules.users.apps.UsersConfig",
+    "modules.repetitions.apps.RepetitionsConfig",
+    "modules.study_sessions.apps.StudySessionsConfig",
 ]
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",

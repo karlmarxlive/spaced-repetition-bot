@@ -5,13 +5,16 @@ from pathlib import Path
 import sqlite3
 from tempfile import TemporaryDirectory
 from threading import Barrier
+from datetime import datetime, timezone
 
 from django.core.management import call_command
-from django.db import connections
+from django.db import connections, OperationalError
 
-from modules.materials.models import Course
+from modules.materials.models import Course, Topic
 from modules.users.models import Invitation, Student
-from modules.users.services import register_student, revoke_invitation
+from modules.users.services import register_student, revoke_invitation, assign_topics
+from modules.repetitions.services import apply_result
+from modules.repetitions.models import TopicProgress
 
 
 def main():
@@ -93,6 +96,62 @@ def main():
         assert (invitation.used_at is None) == revoked
         assert (invitation.student_id is None) == revoked
         assert Student.objects.filter(telegram_id=6).exists() == (not revoked)
+
+        # Two accepted answers serialize on real SQLite; neither reads stale step 0.
+        now = datetime(2026, 9, 20, tzinfo=timezone.utc)
+        student = Student.objects.get(telegram_id=3)
+        topic = Topic.objects.create(course=course, title="Repeat")
+        assign_topics(student.pk, [topic.pk], now=now)
+        assignment = student.topic_assignments.get()
+        connection.settings_dict["OPTIONS"] = {"timeout": 5}
+        connection.close()
+        barrier = Barrier(2)
+
+        def answer(_):
+            try:
+                barrier.wait(timeout=5)
+                return apply_result(assignment.pk, True, now=now).interval_step
+            finally:
+                connections.close_all()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            assert sorted(pool.map(answer, range(2))) == [1, 2]
+        assert TopicProgress.objects.get(assignment=assignment).interval_step == 2
+
+        # Result vs unchanged assignment also preserves the advanced state.
+        barrier = Barrier(2)
+        def answer_or_assign(answering):
+            try:
+                barrier.wait(timeout=5)
+                if answering:
+                    apply_result(assignment.pk, True, now=now)
+                else:
+                    assign_topics(student.pk, [topic.pk], now=now)
+            finally:
+                connections.close_all()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            list(pool.map(answer_or_assign, [True, False]))
+        assert TopicProgress.objects.get(assignment=assignment).interval_step == 3
+
+        connection.settings_dict["OPTIONS"] = {"timeout": 0.05}
+        connection.close()
+        with closing(sqlite3.connect(path, timeout=0.05)) as locker:
+            locker.execute("BEGIN IMMEDIATE")
+            try:
+                for operation in (lambda: apply_result(assignment.pk, False, now=now),
+                                  lambda: assign_topics(student.pk, [], now=now)):
+                    try:
+                        operation()
+                    except OperationalError as error:
+                        assert "locked" in str(error).lower()
+                    else:
+                        raise AssertionError("Expected a real SQLite lock failure")
+            finally:
+                locker.rollback()
+        assignment.refresh_from_db()
+        assert assignment.is_active
+        assert TopicProgress.objects.get(assignment=assignment).interval_step == 3
+        assert apply_result(assignment.pk, False, now=now).interval_step == 0
         connections.close_all()
     print("SQLite races and lock recovery: OK")
 

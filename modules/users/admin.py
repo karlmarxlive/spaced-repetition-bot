@@ -5,6 +5,7 @@ from django import forms
 from django.conf import settings
 from django.contrib import admin, messages
 from django.utils.html import format_html
+from django.utils import timezone
 
 from modules.materials.models import Topic
 from modules.users.models import Invitation, Student
@@ -15,7 +16,7 @@ class StudentForm(forms.ModelForm):
     completed_topics = forms.ModelMultipleChoiceField(
         label="Пройденные темы", queryset=Topic.objects.none(), required=False,
         widget=forms.CheckboxSelectMultiple,
-        help_text="Снятие отметки отключает тему, сохраняя запись. Выдача заданий появится позже.",
+        help_text="Снятие отметки отключает тему и отменяет открытое задание. Ученик начинает занятие через /review.",
     )
 
     class Meta:
@@ -53,7 +54,7 @@ class StudentAdmin(admin.ModelAdmin):
 
     def save_related(self, request, form, formsets, change):
         super().save_related(request, form, formsets, change)
-        assign_topics(form.instance.pk, [topic.pk for topic in form.cleaned_data["completed_topics"]])
+        assign_topics(form.instance.pk, [topic.pk for topic in form.cleaned_data["completed_topics"]], now=timezone.now())
 
 
 @admin.register(Invitation)
