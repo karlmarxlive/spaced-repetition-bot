@@ -1,4 +1,4 @@
-"""Persisted manual review. All returned objects are materialized and reference-free."""
+"""Persisted review queue. All returned objects are materialized and reference-free."""
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
@@ -7,9 +7,10 @@ from django.db.models import F
 
 from modules.checking.services import Checker, check_exact
 from modules.materials.models import Task
-from modules.repetitions.scheduling import moscow_date
+from modules.repetitions.scheduling import MOSCOW, moscow_date
 from modules.repetitions.services import apply_result, due_topics
-from modules.study_sessions.models import Attempt, StudySession, TaskCursor
+from modules.study_sessions.models import (Attempt, DailyReviewRun, DailySchedule,
+                                          ReviewQueueItem, StudySession, TaskCursor)
 from modules.users.models import Student
 
 
@@ -80,12 +81,27 @@ def _choose_task(assignment_id, topic_id):
     return tasks[0]
 
 
-@transaction.atomic
-def start_review(student_id, *, now):
-    moscow_date(now)
-    _lock_student(student_id)
+def _session(student_id, now):
     session, _ = StudySession.objects.get_or_create(student_id=student_id, state="open",
                                                    defaults={"started_at": now})
+    return session
+
+
+def _enqueue(session, *, now, daily=False):
+    excluded = set(ReviewQueueItem.objects.filter(
+        assignment__student_id=session.student_id, state__in=["pending", "open"]
+    ).values_list("assignment_id", flat=True))
+    if not daily:
+        # A manual traversal does not revisit skipped/cancelled topics until a new
+        # session. A daily batch can retry them, even in a multi-day session.
+        excluded.update(item["assignment_id"] for item in session.skipped)
+        excluded.update(session.attempts.filter(status="cancelled").values_list("assignment_id", flat=True))
+    for assignment in due_topics(session.student_id, now=now):
+        if assignment.pk not in excluded:
+            ReviewQueueItem.objects.create(session=session, assignment=assignment, enqueued_at=now)
+
+
+def _advance(session, *, now):
     notices = []
     cancelled = session.attempts.filter(status="cancelled", cancellation_seen=False)
     for attempt in cancelled:
@@ -94,23 +110,28 @@ def start_review(student_id, *, now):
     attempt = session.attempts.filter(status="open").first()
     if attempt:
         return Review("question", _question(attempt), notices=tuple(notices))
-    processed = set(session.attempts.values_list("assignment_id", flat=True))
-    processed.update(item["assignment_id"] for item in session.skipped)
-    for assignment in due_topics(student_id, now=now):
-        if assignment.pk in processed:
+    for item in session.queue.filter(state="pending").select_related("assignment__topic"):
+        assignment = item.assignment
+        if not assignment.is_active:
+            item.state, item.finished_at = "cancelled", now
+            item.save(update_fields=["state", "finished_at"])
             continue
         task = _choose_task(assignment.pk, assignment.topic_id)
         if task is None:
+            item.state, item.finished_at = "skipped", now
+            item.save(update_fields=["state", "finished_at"])
             session.skipped.append({"assignment_id": assignment.pk, "topic": assignment.topic.title})
             notices.append(f"Тема «{assignment.topic.title}» пропущена: нет активных заданий.")
             continue
         attempt = Attempt.objects.create(
-            session=session, student_id=student_id, assignment=assignment, task=task,
+            session=session, student_id=session.student_id, assignment=assignment, task=task,
             opened_at=now, question=task.question, reference=task.answer,
             topic_title=assignment.topic.title, task_order=task.order,
             attachments=[{"path": item.file.name, "name": PurePosixPath(item.file.name).name}
                          for item in task.attachments.order_by("pk")],
         )
+        item.state, item.attempt = "open", attempt
+        item.save(update_fields=["state", "attempt"])
         session.save(update_fields=["skipped"])
         return Review("question", _question(attempt), notices=tuple(notices))
     session.state, session.finished_at = "finished", now
@@ -119,6 +140,43 @@ def start_review(student_id, *, now):
     return Review("finished", summary=Summary(statuses.count("correct"), statuses.count("incorrect"),
                                               len(session.skipped), statuses.count("cancelled")),
                   notices=tuple(notices))
+
+
+@transaction.atomic
+def start_review(student_id, *, now):
+    """Explicit /review: append currently due topics and show the current question."""
+    moscow_date(now)
+    _lock_student(student_id)
+    session = _session(student_id, now)
+    _enqueue(session, now=now)
+    return _advance(session, now=now)
+
+
+@transaction.atomic
+def continue_review(student_id, *, now):
+    """After an answer, consume the persisted queue without forming a new batch."""
+    moscow_date(now)
+    _lock_student(student_id)
+    return _advance(_session(student_id, now), now=now)
+
+
+@transaction.atomic
+def form_daily_review(student_id, *, now):
+    """At most one batch per Moscow day. Existing questions are never resent."""
+    today = moscow_date(now)
+    _lock_student(student_id)
+    schedule = DailySchedule.objects.get(pk=1)
+    if now.astimezone(MOSCOW).time() < schedule.delivery_time:
+        return Review("idle")
+    _, created = DailyReviewRun.objects.get_or_create(
+        student_id=student_id, local_date=today, defaults={"formed_at": now})
+    if not created:
+        return Review("idle")
+    session = _session(student_id, now)
+    _enqueue(session, now=now, daily=True)
+    if session.attempts.filter(status="open").exists():
+        return Review("idle")
+    return _advance(session, now=now)
 
 
 @transaction.atomic
@@ -136,12 +194,14 @@ def accept_answer(student_id, attempt_id, response, *, now, checker: Checker = c
     if not attempt.assignment.is_active:
         attempt.status, attempt.finished_at = "cancelled", now
         attempt.save(update_fields=["status", "finished_at"])
+        ReviewQueueItem.objects.filter(attempt=attempt).update(state="cancelled", finished_at=now)
         return Review("cancelled")
     result = checker(response, attempt.reference)
     if result.status not in ("correct", "incorrect"):
         return Review("unavailable")
     attempt.response, attempt.status, attempt.finished_at = response, result.status, now
     attempt.save(update_fields=["response", "status", "finished_at"])
+    ReviewQueueItem.objects.filter(attempt=attempt).update(state="done", finished_at=now)
     apply_result(attempt.assignment_id, result.status == "correct", now=now)
     TaskCursor.objects.update_or_create(assignment_id=attempt.assignment_id,
         defaults={"last_task_id": attempt.task_id, "last_order": attempt.task_order})

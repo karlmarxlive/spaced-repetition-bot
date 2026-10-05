@@ -8,7 +8,7 @@ from django.utils import timezone
 
 from config.logging import log_failure
 from modules.delivery.services import send_review, send_result, send_text
-from modules.study_sessions.services import (accept_answer, current_question, has_pending_cancellation,
+from modules.study_sessions.services import (accept_answer, continue_review, current_question, has_pending_cancellation,
                                              start_review, student_for_telegram)
 from modules.users.services import register_student
 
@@ -17,8 +17,8 @@ logger = logging.getLogger(__name__)
 START_TEXT = "Для регистрации нужна ссылка-приглашение учителя. Попросите её у учителя."
 REPLIES = {
     "needs_invitation": START_TEXT,
-    "registered": "Регистрация выполнена! Пройденные темы назначает учитель. Начните занятие командой /review.",
-    "existing": "Вы уже зарегистрированы. Пройденные темы назначает учитель. Начните или продолжите занятие: /review.",
+    "registered": "Регистрация выполнена! Пройденные темы назначает учитель. Задания приходят ежедневно; начать вручную можно командой /review.",
+    "existing": "Вы уже зарегистрированы. Пройденные темы назначает учитель. Задания приходят ежедневно; начните или продолжите занятие: /review.",
     "unavailable": "Приглашение недоступно. Обратитесь к учителю за новой ссылкой.",
     "invalid": "Не удалось зарегистрироваться. Откройте ссылку учителя из личного аккаунта Telegram.",
     "busy": "База временно занята. Повторите /start по ссылке учителя через несколько секунд.",
@@ -53,8 +53,9 @@ async def _student(message):
     return student_id
 
 
-async def _continue(message, student_id):
-    review = await sync_to_async(start_review, thread_sensitive=True)(student_id, now=timezone.now())
+async def _continue(message, student_id, *, manual=False):
+    operation = start_review if manual else continue_review
+    review = await sync_to_async(operation, thread_sensitive=True)(student_id, now=timezone.now())
     await send_review(message, review)
 
 
@@ -70,7 +71,7 @@ async def review(message: Message):
     try:
         student_id = await _student(message)
         if student_id is not None:
-            await _continue(message, student_id)
+            await _continue(message, student_id, manual=True)
     except Exception as error:
         await _failure(message, error)
 

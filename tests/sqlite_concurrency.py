@@ -10,11 +10,13 @@ from datetime import datetime, timezone
 from django.core.management import call_command
 from django.db import connections, OperationalError
 
-from modules.materials.models import Course, Topic
+from modules.materials.models import Course, Task, Topic
 from modules.users.models import Invitation, Student
 from modules.users.services import register_student, revoke_invitation, assign_topics
 from modules.repetitions.services import apply_result
 from modules.repetitions.models import TopicProgress
+from modules.study_sessions.models import Attempt, DailyReviewRun, ReviewQueueItem
+from modules.study_sessions.services import accept_answer, current_question, form_daily_review, start_review
 
 
 def main():
@@ -152,6 +154,49 @@ def main():
         assert assignment.is_active
         assert TopicProgress.objects.get(assignment=assignment).interval_step == 3
         assert apply_result(assignment.pk, False, now=now).interval_step == 0
+
+        # Two independent scheduler/manual writers share a persisted queue.
+        connection.settings_dict["OPTIONS"] = {"timeout": 5}
+        connection.close()
+        student = Student.objects.create(course=course, telegram_id=20, first_name="Daily")
+        topics = [Topic.objects.create(course=course, title=f"Daily {i}", order=i) for i in range(2)]
+        for topic in topics:
+            Task.objects.create(topic=topic, title=topic.title, question=topic.title, answer="yes", is_active=True)
+        now = now.replace(hour=15)
+        assign_topics(student.pk, [t.pk for t in topics], now=now)
+
+        def race_review(daily):
+            try:
+                barrier.wait(timeout=5)
+                operation = form_daily_review if daily else start_review
+                return operation(student.pk, now=now).status
+            finally:
+                connections.close_all()
+
+        for sources in ([True, False], [True, True]):
+            barrier = Barrier(2)
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                list(pool.map(race_review, sources))
+            assert ReviewQueueItem.objects.filter(assignment__student=student).count() == 2
+            assert Attempt.objects.filter(student=student, status="open").count() == 1
+            assert DailyReviewRun.objects.filter(student=student).count() == 1
+
+        connections.close_all()  # Reopen from disk, not an in-memory queue.
+        question = current_question(student.pk)
+        barrier = Barrier(2)
+
+        def duplicate_answer(_):
+            try:
+                barrier.wait(timeout=5)
+                return accept_answer(student.pk, question.attempt_id, "yes", now=now).status
+            finally:
+                connections.close_all()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            assert sorted(pool.map(duplicate_answer, range(2))) == ["closed", "correct"]
+        assert TopicProgress.objects.get(assignment__student=student, assignment__topic=topics[0]).interval_step == 1
+        assert ReviewQueueItem.objects.get(attempt_id=question.attempt_id).state == "done"
+        assert start_review(student.pk, now=now).question.text == topics[1].title
         connections.close_all()
     print("SQLite races and lock recovery: OK")
 

@@ -16,7 +16,7 @@ class StudentForm(forms.ModelForm):
     completed_topics = forms.ModelMultipleChoiceField(
         label="Пройденные темы", queryset=Topic.objects.none(), required=False,
         widget=forms.CheckboxSelectMultiple,
-        help_text="Снятие отметки отключает тему и отменяет открытое задание. Ученик начинает занятие через /review.",
+        help_text="Снятие отметки отключает тему и отменяет её очередь и открытое задание. Выдача ежедневная; /review запускает занятие вручную.",
     )
 
     class Meta:
