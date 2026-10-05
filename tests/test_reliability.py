@@ -19,6 +19,7 @@ from django.db import connection
 from django.test import TestCase, TransactionTestCase
 from django.urls import reverse
 
+from bot.texts import REPLIES, START_TEXT
 from modules.delivery.application import daily_review, process_event
 from modules.delivery.models import IncomingEvent, OutgoingMessage, QuestionDelivery
 from modules.delivery.outbox import claim, classify, drain, finish, MAX_ATTEMPTS
@@ -60,6 +61,60 @@ class LessonFixture:
 
 
 class AtomicCycleTests(LessonFixture, TestCase):
+    def failed_start(self):
+        self.process(event(1, 'start', user_id=43))
+        row = claim(bot_id=BOT_ID, now=NOW)
+        self.assertTrue(finish(row, now=NOW, error='chat_unavailable'))
+        return row
+
+    def test_duplicate_start_does_not_reset_failure_or_enqueue(self):
+        self.failed_start()
+        incoming = event(2, 'start', user_id=43)
+        self.process(incoming)
+        row = claim(bot_id=BOT_ID, now=NOW)
+        finish(row, now=NOW, error='network', retry_seconds=5)
+        before = list(OutgoingMessage.objects.values())
+        self.assertFalse(self.process(incoming, now=NOW + timedelta(seconds=1)))
+        self.assertEqual(list(OutgoingMessage.objects.values()), before)
+        row = claim(bot_id=BOT_ID, now=NOW + timedelta(seconds=5))
+        finish(row, now=NOW + timedelta(seconds=5), error='chat_unavailable')
+        before = list(OutgoingMessage.objects.values())
+        self.assertFalse(self.process(incoming, now=NOW + timedelta(seconds=10)))
+        self.assertEqual(list(OutgoingMessage.objects.values()), before)
+        self.assertEqual(IncomingEvent.objects.count(), 2)
+
+    def test_start_recovery_registration_and_event_roll_back_together(self):
+        self.failed_start()
+        before = list(OutgoingMessage.objects.values())
+        invitation = Invitation.objects.create(course=self.course)
+        incoming = event(2, 'start', user_id=43)
+        incoming['payload'] = invitation.token
+        with patch('modules.delivery.application.enqueue_text', side_effect=RuntimeError('crash')):
+            with self.assertRaises(RuntimeError):
+                self.process(incoming)
+        self.assertEqual(list(OutgoingMessage.objects.values()), before)
+        self.assertFalse(IncomingEvent.objects.filter(update_id=2).exists())
+        self.assertFalse(Student.objects.filter(telegram_id=43).exists())
+        invitation.refresh_from_db()
+        self.assertIsNone(invitation.used_at)
+        self.process(incoming)
+        self.assertEqual(OutgoingMessage.objects.first().state, 'pending')
+        self.assertEqual(IncomingEvent.objects.get(update_id=2).student_id,
+                         Student.objects.get(telegram_id=43).pk)
+
+    def test_start_from_group_bot_missing_or_invalid_user_does_not_resume(self):
+        row = self.failed_start()
+        for index, changes in enumerate([
+            {'chat_type': 'group'},
+            {'user': {'id': 43, 'first_name': 'Bot', 'is_bot': True}},
+            {'user': None},
+            {'user': {'id': 43, 'first_name': '', 'is_bot': False}},
+        ], 2):
+            with self.subTest(changes=changes):
+                self.process({**event(index, 'start', user_id=43), **changes})
+                row.refresh_from_db()
+                self.assertEqual((row.state, row.attempts), ('failed', 1))
+
     def test_duplicate_update_after_next_question_and_restart_is_noop(self):
         self.process(event(1, 'review'))
         self.confirm()
@@ -223,7 +278,7 @@ class AtomicCycleTests(LessonFixture, TestCase):
 
 
 class WorkerTests(LessonFixture, TransactionTestCase):
-    async def send(self, *, fail_at=None, now=NOW, cancel=False):
+    async def send(self, *, fail_at=None, now=NOW, cancel=False, permanent=False):
         bot = Bot(str(BOT_ID) + ':' + 'a' * 35)
         sent = []
         async def transport(_bot, method, **kwargs):
@@ -231,6 +286,8 @@ class WorkerTests(LessonFixture, TransactionTestCase):
             sent.append(method)
             self.assertNotIn('reference', str(method.model_dump()))
             if fail_at and len(sent) == fail_at:
+                if permanent:
+                    raise TelegramForbiddenError(method=method, message='private')
                 raise OSError('token url reference')
             if cancel:
                 await sync_to_async(assign_topics)(self.student.pk, [], now=now)
@@ -242,6 +299,71 @@ class WorkerTests(LessonFixture, TransactionTestCase):
         finally:
             await bot.session.close()
         return sent
+
+    async def check_start_recovery(self, *, user_id=43, invite=False):
+        progress = await sync_to_async(list)(TopicProgress.objects.values())
+        await sync_to_async(self.process)(event(1, 'start', user_id=user_id))
+        await self.send(fail_at=1, permanent=True)
+        failed = await sync_to_async(OutgoingMessage.objects.get)()
+        self.assertEqual((failed.state, failed.attempts), ('failed', 1))
+        self.assertEqual(await self.send(), [])
+        incoming = event(2, 'start', user_id=user_id)
+        if invite:
+            invitation = await sync_to_async(Invitation.objects.create)(course=self.course)
+            incoming['payload'] = invitation.token
+        later = NOW + timedelta(seconds=10)
+        await sync_to_async(self.process)(incoming, now=later)
+        await sync_to_async(failed.refresh_from_db)()
+        self.assertEqual((failed.state, failed.attempts, failed.error, failed.next_attempt_at),
+                         ('pending', 0, '', later))
+        sent = await self.send(now=later)
+        expected = REPLIES['registered'] if invite else REPLIES['existing'] if user_id == 42 else START_TEXT
+        self.assertEqual([m.text for m in sent], [failed.text, expected])
+        self.assertEqual(await sync_to_async(OutgoingMessage.objects.filter(state='sent').count)(), 2)
+        self.assertEqual(await sync_to_async(Student.objects.filter(telegram_id=user_id).exists)(),
+                         invite or user_id == 42)
+        if invite:
+            await sync_to_async(invitation.refresh_from_db)()
+            self.assertIsNotNone(invitation.used_at)
+            registered = await sync_to_async(Student.objects.get)(telegram_id=user_id)
+            self.assertEqual(invitation.student_id, registered.pk)
+        self.assertFalse(await sync_to_async(Attempt.objects.exists)())
+        self.assertFalse(await sync_to_async(StudySession.objects.exists)())
+        self.assertEqual(await sync_to_async(list)(TopicProgress.objects.values()), progress)
+
+    async def test_start_without_invitation_resumes_failed_queue(self):
+        await self.check_start_recovery()
+
+    async def test_start_with_invitation_registers_and_delivers_welcome_after_failure(self):
+        await self.check_start_recovery(invite=True)
+
+    async def test_start_registered_student_resumes_without_opening_lesson(self):
+        await self.check_start_recovery(user_id=42)
+
+    async def test_start_resumes_only_unconfirmed_question_parts(self):
+        await sync_to_async(self.process)(event(1, 'review'))
+        await self.send(fail_at=2, permanent=True)
+        confirmed = await sync_to_async(OutgoingMessage.objects.get)(state='sent')
+        progress = await sync_to_async(list)(TopicProgress.objects.values())
+        attempts = await sync_to_async(list)(Attempt.objects.values())
+        await sync_to_async(self.process)(event(2, 'start'))
+        sent = await self.send()
+        self.assertEqual([m.text for m in sent], ['Question 0', REPLIES['existing']])
+        self.assertEqual((await sync_to_async(OutgoingMessage.objects.get)(pk=confirmed.pk)).attempts, 1)
+        self.assertEqual((await sync_to_async(QuestionDelivery.objects.get)()).state, 'delivered')
+        self.assertEqual(await sync_to_async(list)(Attempt.objects.values()), attempts)
+        self.assertEqual(await sync_to_async(list)(TopicProgress.objects.values()), progress)
+
+    async def test_start_does_not_revive_cancelled_question(self):
+        await sync_to_async(self.process)(event(1, 'review'))
+        await self.send(fail_at=1, permanent=True)
+        await sync_to_async(assign_topics)(self.student.pk, [], now=NOW)
+        attempts = await sync_to_async(list)(Attempt.objects.values())
+        await sync_to_async(self.process)(event(2, 'start'))
+        sent = await self.send()
+        self.assertEqual([m.text for m in sent], [REPLIES['existing']])
+        self.assertFalse(await sync_to_async(OutgoingMessage.objects.filter(is_question=True).exclude(state='cancelled').exists)())
+        self.assertEqual(await sync_to_async(list)(Attempt.objects.values()), attempts)
 
     async def test_partial_long_question_files_resume_only_failed_part(self):
         text = '😀x' * 3000

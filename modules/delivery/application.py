@@ -51,6 +51,8 @@ def _process_event(event, *, now):
             last_name=user.get('last_name'), username=user.get('username'), payload=event.get('payload'))
         if result.status == 'busy':
             raise OperationalError('database locked')
+        if result.status != 'invalid':
+            resume_chat(bot_id, chat_id, now=now)
         recorded.student_id = result.student_id
         common['student_id'] = result.student_id
         tell(REPLIES[result.status])
