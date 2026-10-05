@@ -1,6 +1,8 @@
 import re
 
 from aiogram.utils.deep_linking import create_deep_link
+from django.urls import path, reverse
+from modules.users import statistics
 from django import forms
 from django.conf import settings
 from django.contrib import admin, messages
@@ -38,9 +40,23 @@ class StudentAdmin(admin.ModelAdmin):
     list_display = ["name", "telegram_id", "username", "course", "registered_at"]
     list_filter = ["course"]
     search_fields = ["display_name", "first_name", "last_name", "username", "=telegram_id"]
-    readonly_fields = ["telegram_id", "username", "first_name", "last_name", "course", "registered_at"]
+    readonly_fields = ["statistics_link", "telegram_id", "username", "first_name", "last_name", "course", "registered_at"]
     fields = ["display_name", *readonly_fields, "completed_topics"]
     list_select_related = ["course"]
+
+    def get_urls(self):
+        def view(function):
+            return self.admin_site.admin_view(lambda request, **kwargs: function(self, request, **kwargs))
+        return [
+            path('<int:student_id>/statistics/', view(statistics.statistics), name='users_student_statistics'),
+            path('<int:student_id>/statistics/<int:attempt_id>/', view(statistics.attempt_detail), name='users_student_attempt'),
+            path('<int:student_id>/statistics/<int:attempt_id>/files/<int:index>/', view(statistics.attempt_file), name='users_student_attempt_file'),
+        ] + super().get_urls()
+
+    @admin.display(description='Учебная статистика')
+    def statistics_link(self, obj):
+        return format_html('<a href="{}">Прогресс, история и доставка</a>',
+                           reverse('admin:users_student_statistics', args=[obj.pk]))
 
     @admin.display(description="Имя ученика")
     def name(self, obj):

@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from aiogram import Bot, Dispatcher
 from aiogram.methods import SendMessage
-from aiogram.types import Update
+from aiogram.types import Message, Update
 from django.conf import settings
 from django.test import Client, TransactionTestCase
 from django.utils import timezone
@@ -141,7 +141,7 @@ class StartRoutingTests(TransactionTestCase):
                 "from": {"id": 42, "is_bot": False, "first_name": "Test"},
                 "text": "/start", "entities": [{"type": "bot_command", "offset": 0, "length": 6}]},
         })
-        with patch.object(bot.session, "make_request", new_callable=AsyncMock) as request:
+        with patch.object(bot.session, "make_request", new_callable=AsyncMock, return_value=Message.model_validate({"message_id": 2, "date": 0, "chat": {"id": 42, "type": "private"}})) as request:
             await dispatcher.feed_update(bot, update)
         request.assert_awaited_once()
         method = request.call_args.args[1]

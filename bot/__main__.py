@@ -4,7 +4,8 @@ import logging
 import logging.config
 import os
 
-from aiogram import Bot, Dispatcher
+from aiogram import Bot
+from bot.polling import ReliableDispatcher as Dispatcher
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.exceptions import TelegramNetworkError, TelegramUnauthorizedError
 from aiogram.utils.token import TokenValidationError
@@ -29,7 +30,7 @@ async def run(token, check=False):
         dispatcher.include_router(create_router())
         logger.info("Бот запущен: long polling; остановка — Ctrl+C")
         # asyncio.run handles Ctrl+C on Windows; aiogram handles POSIX signals.
-        await dispatcher.start_polling(bot, close_bot_session=False)
+        await dispatcher.start_polling(bot, close_bot_session=False, handle_as_tasks=False)
 
 
 def main():

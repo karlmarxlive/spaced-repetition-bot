@@ -1,0 +1,27 @@
+{% extends "admin/base_site.html" %}
+{% block content %}
+<p><a href="{% url 'admin:users_student_change' student.pk %}">Карточка ученика</a></p>
+<h2>Назначения</h2>
+<table><thead><tr><th>Тема</th><th>Активна</th><th>Ступень</th><th>Интервал</th><th>Следующая дата</th></tr></thead><tbody>
+{% for a in assignments %}<tr><td>{{ a.topic.title }}</td><td>{{ a.is_active|yesno:"Да,Нет" }}</td><td>{{ a.progress.interval_step }}</td><td>{{ a.interval_label }}</td><td>{{ a.progress.next_review_date }}{% if not a.is_active %} (выдача отключена){% endif %}</td></tr>{% endfor %}
+</tbody></table>
+<p>Максимальная ступень продолжает повторения через 60 дней.</p>
+<h2>История попыток</h2>
+<form method="get">
+<label>Исходная тема <select name="topic"><option value="">Все темы этого ученика</option>{% for a in assignments %}<option value="{{ a.topic_id }}" {% if filters.topic == a.topic_id|stringformat:"s" %}selected{% endif %}>{{ a.topic.title }}</option>{% endfor %}</select></label>
+<label>Статус <select name="status"><option value="">Все</option><option value="correct" {% if filters.status == 'correct' %}selected{% endif %}>Верно</option><option value="incorrect" {% if filters.status == 'incorrect' %}selected{% endif %}>Неверно</option><option value="open" {% if filters.status == 'open' %}selected{% endif %}>Открыта</option><option value="cancelled" {% if filters.status == 'cancelled' %}selected{% endif %}>Отменена</option></select></label>
+<label>Открыта с <input type="date" name="from" value="{{ filters.from }}"></label><label>по (включительно) <input type="date" name="to" value="{{ filters.to }}"></label><button type="submit">Применить</button>
+</form>
+<p>Фильтр и даты относятся к времени открытия попытки, Москва (Europe/Moscow). Количества по текущему фильтру: верных {{ counts.correct|default:0 }}, неверных {{ counts.incorrect|default:0 }}, открытых {{ counts.open|default:0 }}, отменённых {{ counts.cancelled|default:0 }}. Открытые и отменённые не входят в завершённые ответы и ошибки.</p>
+<table><thead><tr><th>Попытка</th><th>Исходная тема (снимок)</th><th>Статус</th><th>Открыта</th><th>Завершена</th></tr></thead><tbody>
+{% for a in history %}<tr><td><a href="{% url 'admin:users_student_attempt' student.pk a.pk %}">{{ a.pk }} — условие, эталон и ответ</a></td><td>{{ a.topic_title }}</td><td>{{ a.status }}</td><td>{{ a.opened_at }}</td><td>{{ a.finished_at|default:"—" }}</td></tr>{% endfor %}
+</tbody></table>
+<p>Страница {{ history.number }} из {{ history.paginator.num_pages }} {% if history.has_previous %}<a href="?{{ page_query }}&amp;page={{ history.previous_page_number }}">Назад</a>{% endif %} {% if history.has_next %}<a href="?{{ page_query }}&amp;page={{ history.next_page_number }}">Далее</a>{% endif %}</p>
+<h2>Текущий вопрос и доставка</h2>
+{% if current %}<p><a href="{% url 'admin:users_student_attempt' student.pk current.pk %}">Попытка {{ current.pk }}: {{ current.topic_title }}</a>. Доставка: {{ delivery.state|default:"неизвестна (этап 6)" }}; {{ delivery.delivered_at|default:"не подтверждена" }}</p>{% else %}<p>Открытого вопроса нет.</p>{% endif %}
+<p>Для восстановления после исправления причины ученик отправляет /review. Это не меняет прогресс.</p>
+<table><thead><tr><th>Отправка</th><th>Попытка</th><th>Состояние</th><th>Число отправок</th><th>Безопасная ошибка</th><th>Следующий повтор (Москва)</th></tr></thead><tbody>
+{% for m in outgoing %}<tr><td>{{ m.pk }} / часть {{ m.part }}</td><td>{{ m.attempt_id|default:"—" }}</td><td>{{ m.get_state_display }}</td><td>{{ m.attempts }}</td><td>{{ m.error_label }}</td><td>{% if m.state == 'failed' %}После исправления и /review{% elif m.state == 'sending' %}Захват до {{ m.lease_until }}{% else %}{{ m.next_attempt_at }}{% endif %}</td></tr>{% endfor %}
+</tbody></table>
+<p>Страница доставки {{ outgoing.number }} из {{ outgoing.paginator.num_pages }} {% if outgoing.has_previous %}<a href="?{{ page_query }}&amp;delivery_page={{ outgoing.previous_page_number }}">Назад</a>{% endif %} {% if outgoing.has_next %}<a href="?{{ page_query }}&amp;delivery_page={{ outgoing.next_page_number }}">Далее</a>{% endif %}</p>
+{% endblock %}

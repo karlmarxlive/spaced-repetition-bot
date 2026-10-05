@@ -23,6 +23,7 @@ INSTALLED_APPS = [
     "modules.users.apps.UsersConfig",
     "modules.repetitions.apps.RepetitionsConfig",
     "modules.study_sessions.apps.StudySessionsConfig",
+    "modules.delivery.apps.DeliveryConfig",
 ]
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",

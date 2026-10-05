@@ -252,7 +252,7 @@ class SchedulerDeliveryTests(DailyFixture, TransactionTestCase):
     async def test_failure_does_not_stop_other_student_and_manual_recovers(self):
         other = await sync_to_async(Student.objects.create)(course=self.course, telegram_id=43, first_name='Other')
         await sync_to_async(assign_topics)(other.pk, [self.topics[0].pk], now=NOW)
-        with self.assertLogs('modules.delivery.scheduler', level='ERROR') as logs:
+        with self.assertLogs('modules.delivery.outbox', level='ERROR') as logs:
             outgoing = await self.tick(fail_chat=42)
         self.assertNotIn('secret-reference', '\n'.join(logs.output))
         self.assertEqual([m.chat_id for m in outgoing], [42, 43, 43])
@@ -274,14 +274,14 @@ class SchedulerCommandTests(TestCase):
         with patch.dict(os.environ, {'TELEGRAM_BOT_TOKEN': ''}), self.assertRaisesMessage(CommandError, 'TELEGRAM_BOT_TOKEN'):
             call_command('run_scheduler', skip_checks=True, stdout=io.StringIO())
 
-    async def test_loop_ticks_immediately_and_sleeps_30_seconds(self):
+    async def test_loop_ticks_immediately_and_sleeps_2_seconds(self):
         with patch('modules.delivery.scheduler.run_tick', new_callable=AsyncMock) as tick, patch(
                 'modules.delivery.scheduler.asyncio.sleep', new_callable=AsyncMock,
                 side_effect=asyncio.CancelledError) as sleep:
             with self.assertRaises(asyncio.CancelledError):
                 await run_scheduler(object())
             tick.assert_awaited_once()
-            sleep.assert_awaited_once_with(30)
+            sleep.assert_awaited_once_with(2)
 
     async def test_once_and_network_session_cleanup(self):
         from modules.study_sessions.management.commands.run_scheduler import run

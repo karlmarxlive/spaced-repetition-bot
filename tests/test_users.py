@@ -362,16 +362,17 @@ class StartIntegrationTests(TransactionTestCase):
         self.invitation = Invitation.objects.create(course=self.course)
 
     async def dispatch(self, text, *, chat_type="private", user=None):
+        self.event_id = getattr(self, "event_id", 0) + 100
         bot = Bot("123456789:" + "a" * 35)
         dispatcher = Dispatcher()
         dispatcher.include_router(create_router())
-        update = Update.model_validate({"update_id": 1, "message": {
+        update = Update.model_validate({"update_id": self.event_id, "message": {
             "message_id": 1, "date": 0, "chat": {"id": 42, "type": chat_type},
             "from": user or {"id": 42, "first_name": "From Telegram", "is_bot": False},
             "text": text, "entities": [{"type": "bot_command", "offset": 0, "length": 6}],
         }})
         try:
-            with patch.object(bot.session, "make_request", new_callable=AsyncMock) as transport:
+            with patch.object(bot.session, "make_request", new_callable=AsyncMock, return_value=Message.model_validate({"message_id": self.event_id + 1, "date": 0, "chat": {"id": 42, "type": chat_type}})) as transport:
                 await dispatcher.feed_update(bot, update)
             transport.assert_awaited_once()
             return transport.call_args.args[1].text
@@ -399,12 +400,12 @@ class StartIntegrationTests(TransactionTestCase):
         self.assertIsNone(self.invitation.used_at)
 
     async def test_missing_sender(self):
-        message = Message.model_validate({"message_id": 1, "date": 0, "chat": {"id": 42, "type": "private"},
-                                          "text": "/start"})
-        with patch.object(Message, "answer", new_callable=AsyncMock) as answer:
-            await start(message, CommandObject(prefix="/", command="start", args=self.invitation.token))
-        answer.assert_awaited_once_with(REPLIES["invalid"])
-        self.assertFalse(await sync_to_async(Student.objects.exists, thread_sensitive=True)())
+        from modules.delivery.application import process_event
+        from modules.delivery.models import OutgoingMessage
+        await sync_to_async(process_event)({'bot_id': 1, 'update_id': 1, 'chat_id': 42,
+            'chat_type': 'private', 'message_id': 1, 'kind': 'start', 'user': None}, now=timezone.now())
+        self.assertEqual((await sync_to_async(OutgoingMessage.objects.get)()).text, REPLIES['invalid'])
+        self.assertFalse(await sync_to_async(Student.objects.exists)())
 
     async def test_invalid_payload_through_dispatcher(self):
         for payload in ("bad payload", "a" * 65, "unknown"):

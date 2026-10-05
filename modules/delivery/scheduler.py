@@ -2,30 +2,20 @@
 import asyncio
 import logging
 
+from aiogram.exceptions import TelegramUnauthorizedError
+
 from asgiref.sync import sync_to_async
 from django.db import close_old_connections
 from django.utils import timezone
 
 from config.logging import log_failure
-from modules.delivery.services import send_review
+from modules.delivery.application import daily_review
+from modules.delivery.outbox import drain
 from modules.repetitions.scheduling import MOSCOW, moscow_date
 from modules.study_sessions.models import DailyReviewRun, DailySchedule
-from modules.study_sessions.services import form_daily_review
 from modules.users.models import Student
 
 logger = logging.getLogger(__name__)
-
-
-class ChatRecipient:
-    """The same transport interface as Message, for unsolicited private delivery."""
-    def __init__(self, bot, chat_id):
-        self.bot, self.chat_id = bot, chat_id
-
-    async def answer(self, text, **kwargs):
-        return await self.bot.send_message(self.chat_id, text, **kwargs)
-
-    async def answer_document(self, document, **kwargs):
-        return await self.bot.send_document(self.chat_id, document, **kwargs)
 
 
 def _candidates(now):
@@ -37,37 +27,33 @@ def _candidates(now):
     return list(Student.objects.exclude(pk__in=processed).order_by("pk").values_list("pk", "telegram_id"))
 
 
-def _form(student_id, now):
+def _form(student_id, now, bot_id):
     close_old_connections()
-    return form_daily_review(student_id, now=now)
+    return daily_review(student_id, now=now, bot_id=bot_id)
 
 
-async def run_tick(bot, *, now):
-    """One deterministic pass; failed formation can be retried on the next tick.
-
-    A transport failure preserves the opened attempt. Stage 7 will add an outbox;
-    until then /review is the explicit recovery path for uncertain delivery.
-    """
-    sent = 0
+async def run_tick(bot, *, now, live_delivery=False):
+    """Form daily state and independently recover pending delivery on every tick."""
+    formed = 0
     for student_id, telegram_id in await sync_to_async(_candidates, thread_sensitive=True)(now):
         try:
-            review = await sync_to_async(_form, thread_sensitive=True)(student_id, now)
-            if review.question:
-                await send_review(ChatRecipient(bot, telegram_id), review)
-                sent += 1
+            formed += await sync_to_async(_form, thread_sensitive=True)(student_id, now, bot.id)
         except Exception as error:
             log_failure(logger, f"Ошибка ежедневной выдачи ученику {student_id}", error)
-    return sent
+    await drain(bot, now=None if live_delivery else now)
+    return formed
 
 
 async def run_scheduler(bot, *, once=False):
     while True:
         try:
-            await run_tick(bot, now=timezone.now())
+            await run_tick(bot, now=timezone.now(), live_delivery=True)
+        except TelegramUnauthorizedError:
+            raise
         except Exception as error:
             log_failure(logger, "Ошибка прохода планировщика", error)
             if once:
                 raise
         if once:
             return
-        await asyncio.sleep(30)
+        await asyncio.sleep(2)

@@ -1,0 +1,9 @@
+{% extends "admin/base_site.html" %}
+{% block content %}
+<p><a href="{% url 'admin:users_student_statistics' student.pk %}">Статистика ученика</a></p>
+<p>Исходная тема: {{ attempt.topic_title }}. Статус: {{ attempt.status }}. Открыта: {{ attempt.opened_at }}. Завершена: {{ attempt.finished_at|default:"—" }}. Москва (Europe/Moscow).</p>
+<h2>Сохранённое условие</h2><pre style="white-space:pre-wrap">{{ attempt.question }}</pre>
+<h2>Сохранённый эталон (только учителю)</h2><pre style="white-space:pre-wrap">{{ attempt.reference }}</pre>
+<h2>Принятый ответ</h2><pre style="white-space:pre-wrap">{{ attempt.response|default_if_none:"Ответ не принят" }}</pre>
+<h2>Вложения снимка</h2>{% for item in attachments %}<p><a href="{{ item.url }}">{{ item.name }}</a></p>{% endfor %}
+{% endblock %}

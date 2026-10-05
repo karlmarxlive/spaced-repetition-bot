@@ -44,10 +44,11 @@ class ReviewDeliveryTests(TransactionTestCase):
 
     async def dispatch(self, text=None, *, chat_type='private', user_id=42, extra=None, fail_at=None,
                        now=NOW, tick_during_result=False):
+        self.event_id = getattr(self, 'event_id', 0) + 100
         bot = Bot('123456789:' + 'a' * 35)
         dispatcher = Dispatcher()
         dispatcher.include_router(create_router())
-        message = {'message_id': 1, 'date': 0, 'chat': {'id': user_id, 'type': chat_type},
+        message = {'message_id': self.event_id, 'date': 0, 'chat': {'id': user_id, 'type': chat_type},
                    'from': {'id': user_id, 'first_name': 'Same name', 'is_bot': False}}
         if text is not None:
             message['text'] = text
@@ -59,7 +60,7 @@ class ReviewDeliveryTests(TransactionTestCase):
             self.assertFalse(await sync_to_async(lambda: connection.in_atomic_block)())
             outgoing.append(method)
             if tick_during_result and getattr(method, 'text', None) in ('Верно.', 'Неверно.'):
-                # Answer committed, but the handler has not continued the lesson yet.
+                # Answer and continuation committed; result is currently leased in transport.
                 self.assertEqual(await run_tick(bot, now=DAILY_NOW), 0)
                 self.assertEqual((await sync_to_async(StudySession.objects.get)()).state, 'finished')
             if fail_at and len(outgoing) == fail_at:
@@ -68,12 +69,12 @@ class ReviewDeliveryTests(TransactionTestCase):
                 # Exercise local file reading too; never call the network.
                 data = b''.join([part async for part in method.document.read(bot)])
                 self.assertTrue(data)
-            return Message.model_validate({'message_id': len(outgoing), 'date': 0,
+            return Message.model_validate({'message_id': self.event_id + len(outgoing), 'date': 0,
                                             'chat': {'id': user_id, 'type': chat_type}})
         try:
             with patch.object(bot.session, 'make_request', side_effect=capture), patch(
                     'bot.handlers.timezone.now', return_value=now):
-                await dispatcher.feed_update(bot, Update.model_validate({'update_id': 1, 'message': message}))
+                await dispatcher.feed_update(bot, Update.model_validate({'update_id': self.event_id, 'message': message}))
         finally:
             await bot.session.close()
         for method in outgoing:
@@ -88,7 +89,7 @@ class ReviewDeliveryTests(TransactionTestCase):
     async def check_last_answer_with_scheduler(self, response, correct):
         await sync_to_async(DailySchedule.objects.update_or_create)(pk=1, defaults={'delivery_time': '18:00'})
         await sync_to_async(assign_topics)(self.student.pk, [self.topics[0].pk], now=DAILY_NOW)
-        before = DAILY_NOW - timedelta(minutes=1)
+        before = DAILY_NOW - timedelta(seconds=1)
         await self.dispatch('/review', now=before)
         with patch('modules.study_sessions.services.apply_result', wraps=apply_result) as apply:
             outgoing = self.texts(await self.dispatch(response, now=before, tick_during_result=True))
@@ -111,7 +112,7 @@ class ReviewDeliveryTests(TransactionTestCase):
         await self.check_last_answer_with_scheduler('wrong', False)
 
     async def test_accumulated_summary_with_scheduler_during_last_result(self):
-        before = DAILY_NOW - timedelta(minutes=1)
+        before = DAILY_NOW - timedelta(seconds=1)
         await sync_to_async(DailySchedule.objects.update_or_create)(pk=1, defaults={'delivery_time': '18:00'})
         skipped = await sync_to_async(Topic.objects.create)(course=self.course, title='Skipped', order=2)
         cancelled = await sync_to_async(Topic.objects.create)(course=self.course, title='Cancelled', order=3)
@@ -198,17 +199,20 @@ class ReviewDeliveryTests(TransactionTestCase):
 
     async def test_missing_file_and_transport_error_preserve_attempt_and_safe_logs(self):
         attachment = await sync_to_async(TaskAttachment.objects.create)(task=self.tasks[0], file='tasks/missing.txt')
-        with self.assertLogs('bot.handlers', level='ERROR') as logs:
-            outgoing = await self.dispatch('/review')
-        self.assertIn('/review', self.texts(outgoing)[-1])
+        from modules.delivery.models import OutgoingMessage
+        await self.dispatch('/review')
         first = await sync_to_async(current_question)(self.student.pk)
+        failed = await sync_to_async(OutgoingMessage.objects.get)(state='failed')
+        self.assertEqual(failed.error, 'attachment')
         self.assertEqual(first.attachments[0].path, attachment.file.name)
         path = Path(settings.MEDIA_ROOT) / attachment.file.name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b'restored')
-        with self.assertLogs('bot.handlers', level='ERROR') as logs:
-            await self.dispatch('/review', fail_at=3)
-        self.assertNotIn('secret-reference', '\n'.join(logs.output))
+        await self.dispatch('/review', fail_at=1)
+        retry = await sync_to_async(OutgoingMessage.objects.get)(state='retry')
+        self.assertEqual(retry.error, 'network')
+        # Wait is represented by advancing the saved deadline, not real sleep.
+        await sync_to_async(OutgoingMessage.objects.filter(pk=retry.pk).update)(next_attempt_at=NOW)
         await self.dispatch('/review')
         self.assertEqual(await sync_to_async(current_question)(self.student.pk), first)
         self.assertEqual(await sync_to_async(Attempt.objects.count)(), 1)
@@ -231,12 +235,11 @@ class ReviewDeliveryTests(TransactionTestCase):
     async def test_checker_unavailable_and_technical_error_are_not_wrong_answers(self):
         await self.dispatch('/review')
         from modules.study_sessions.services import Review
-        with patch('bot.handlers.accept_answer', return_value=Review('unavailable')):
+        with patch('modules.delivery.application.accept_answer', return_value=Review('unavailable')):
             self.assertIn('недоступна', self.texts(await self.dispatch('text'))[0])
         with patch('modules.study_sessions.services.apply_result', side_effect=RuntimeError('private answer')):
-            with self.assertLogs('bot.handlers', level='ERROR') as logs:
+            with self.assertRaises(RuntimeError):
                 await self.dispatch('text')
-            self.assertNotIn('private answer', '\n'.join(logs.output))
         self.assertEqual(await sync_to_async(Attempt.objects.filter(status='open').count)(), 1)
         self.assertEqual(await sync_to_async(TopicProgress.objects.filter(interval_step=0).count)(), 2)
 

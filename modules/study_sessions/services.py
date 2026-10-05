@@ -188,6 +188,10 @@ def form_daily_review(student_id, *, now):
         student_id=student_id, local_date=today, defaults={"formed_at": now})
     if not created:
         return Review("idle")
+    # An answer now finishes its session before any result reaches the network.
+    # Empty daily runs still record the date, without manufacturing a new session.
+    if not StudySession.objects.filter(student_id=student_id, state="open").exists() and not due_topics(student_id, now=now):
+        return Review("idle")
     session = _session(student_id, now)
     _enqueue(session, now=now, daily=True)
     if session.attempts.filter(status="open").exists():
