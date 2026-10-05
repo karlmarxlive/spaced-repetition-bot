@@ -53,9 +53,10 @@ async def _student(message):
     return student_id
 
 
-async def _continue(message, student_id, *, manual=False):
+async def _continue(message, student_id, *, manual=False, session_id=None):
     operation = start_review if manual else continue_review
-    review = await sync_to_async(operation, thread_sensitive=True)(student_id, now=timezone.now())
+    kwargs = {} if manual else {"session_id": session_id}
+    review = await sync_to_async(operation, thread_sensitive=True)(student_id, now=timezone.now(), **kwargs)
     await send_review(message, review)
 
 
@@ -93,7 +94,7 @@ async def answer(message: Message):
             student_id, question.attempt_id, message.text, now=timezone.now())
         await send_result(message, result)
         if result.status in ("correct", "incorrect", "cancelled"):
-            await _continue(message, student_id)
+            await _continue(message, student_id, session_id=result.session_id)
     except Exception as error:
         await _failure(message, error)
 

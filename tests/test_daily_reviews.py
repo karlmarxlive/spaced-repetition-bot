@@ -44,6 +44,41 @@ class DailyFixture:
 
 
 class DailyReviewTests(DailyFixture, TestCase):
+    def test_bound_continuation_returns_finished_summary_without_touching_new_session(self):
+        before = NOW - timedelta(minutes=1)
+        first = start_review(self.student.pk, now=before).question
+        accepted = self.answer(first, before)
+        session_id = Attempt.objects.get(pk=first.attempt_id).session_id
+        self.assertEqual(accepted.session_id, session_id)
+        second = continue_review(self.student.pk, session_id=session_id, now=before).question
+        accepted = accept_answer(self.student.pk, second.attempt_id, 'wrong', now=before)
+        self.assertEqual(accepted.session_id, session_id)
+        finished = self.daily()
+        session = StudySession.objects.get(pk=session_id)
+        progress = list(TopicProgress.objects.order_by('pk').values())
+        for now in (NOW, NOW + timedelta(minutes=1)):
+            self.assertEqual(continue_review(self.student.pk, session_id=session_id, now=now), finished)
+        self.assertEqual(StudySession.objects.count(), 1)
+        session.refresh_from_db()
+        self.assertEqual(session.finished_at, NOW)
+        new = start_review(self.student.pk, now=NOW + timedelta(days=1))
+        self.assertIsNotNone(new.question)
+        self.assertEqual(continue_review(self.student.pk, session_id=session_id,
+                                        now=NOW + timedelta(days=1)), finished)
+        self.assertEqual(current_question(self.student.pk), new.question)
+        self.assertEqual(StudySession.objects.count(), 2)
+        self.assertEqual(list(TopicProgress.objects.order_by('pk').values()), progress)
+
+    def test_continuation_never_creates_or_uses_another_students_session(self):
+        self.assertEqual(continue_review(self.student.pk, now=NOW).status, 'idle')
+        self.assertFalse(StudySession.objects.exists())
+        other = Student.objects.create(course=self.course, telegram_id=43, first_name='Other')
+        session = StudySession.objects.create(student=other, started_at=NOW)
+        self.assertEqual(continue_review(self.student.pk, session_id=session.pk, now=NOW).status, 'idle')
+        self.assertEqual(StudySession.objects.count(), 1)
+        session.refresh_from_db()
+        self.assertEqual(session.state, 'open')
+
     def test_time_boundary_repeat_and_naive_time(self):
         self.assertEqual(self.daily(NOW - timedelta(microseconds=1)).status, 'idle')
         self.assertFalse(DailyReviewRun.objects.exists())

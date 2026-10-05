@@ -42,6 +42,7 @@ class Review:
     question: Question | None = None
     summary: Summary | None = None
     notices: tuple[str, ...] = ()
+    session_id: int | None = None
 
 
 def _question(attempt):
@@ -101,7 +102,18 @@ def _enqueue(session, *, now, daily=False):
             ReviewQueueItem.objects.create(session=session, assignment=assignment, enqueued_at=now)
 
 
+def _finished_review(session, *, notices=()):
+    statuses = list(session.attempts.values_list("status", flat=True))
+    return Review("finished", summary=Summary(statuses.count("correct"), statuses.count("incorrect"),
+                                              len(session.skipped), statuses.count("cancelled")),
+                  notices=notices, session_id=session.pk)
+
+
 def _advance(session, *, now):
+    if session.state == "finished":
+        # A scheduler may have finished this session while feedback was sent.
+        # Read its historical result without advancing another session.
+        return _finished_review(session)
     notices = []
     cancelled = session.attempts.filter(status="cancelled", cancellation_seen=False)
     for attempt in cancelled:
@@ -136,10 +148,7 @@ def _advance(session, *, now):
         return Review("question", _question(attempt), notices=tuple(notices))
     session.state, session.finished_at = "finished", now
     session.save(update_fields=["state", "finished_at", "skipped"])
-    statuses = list(session.attempts.values_list("status", flat=True))
-    return Review("finished", summary=Summary(statuses.count("correct"), statuses.count("incorrect"),
-                                              len(session.skipped), statuses.count("cancelled")),
-                  notices=tuple(notices))
+    return _finished_review(session, notices=tuple(notices))
 
 
 @transaction.atomic
@@ -153,11 +162,18 @@ def start_review(student_id, *, now):
 
 
 @transaction.atomic
-def continue_review(student_id, *, now):
-    """After an answer, consume the persisted queue without forming a new batch."""
+def continue_review(student_id, *, now, session_id=None):
+    """Continue the answer's session, or the open queue for a late cancellation.
+
+    Only explicit manual/daily starts can create a session. A finished session
+    identified by the accepted answer returns its summary even after a new start.
+    """
     moscow_date(now)
     _lock_student(student_id)
-    return _advance(_session(student_id, now), now=now)
+    sessions = StudySession.objects.filter(student_id=student_id)
+    session = (sessions.filter(pk=session_id) if session_id is not None
+               else sessions.filter(state="open")).first()
+    return _advance(session, now=now) if session else Review("idle")
 
 
 @transaction.atomic
@@ -188,14 +204,15 @@ def accept_answer(student_id, attempt_id, response, *, now, checker: Checker = c
     if attempt is None:
         return Review("no_attempt")
     if attempt.status != "open":
-        return Review("cancelled" if attempt.status == "cancelled" else "closed")
+        return Review("cancelled" if attempt.status == "cancelled" else "closed",
+                      session_id=attempt.session_id)
     if not isinstance(response, str) or not response.strip() or response.lstrip().startswith("/"):
         return Review("text_required")
     if not attempt.assignment.is_active:
         attempt.status, attempt.finished_at = "cancelled", now
         attempt.save(update_fields=["status", "finished_at"])
         ReviewQueueItem.objects.filter(attempt=attempt).update(state="cancelled", finished_at=now)
-        return Review("cancelled")
+        return Review("cancelled", session_id=attempt.session_id)
     result = checker(response, attempt.reference)
     if result.status not in ("correct", "incorrect"):
         return Review("unavailable")
@@ -205,7 +222,7 @@ def accept_answer(student_id, attempt_id, response, *, now, checker: Checker = c
     apply_result(attempt.assignment_id, result.status == "correct", now=now)
     TaskCursor.objects.update_or_create(assignment_id=attempt.assignment_id,
         defaults={"last_task_id": attempt.task_id, "last_order": attempt.task_order})
-    return Review(result.status)
+    return Review(result.status, session_id=attempt.session_id)
 
 
 def has_pending_cancellation(student_id):

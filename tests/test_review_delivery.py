@@ -1,4 +1,5 @@
 from pathlib import Path
+from datetime import timedelta
 from unittest.mock import patch
 
 from aiogram import Bot, Dispatcher
@@ -7,16 +8,20 @@ from asgiref.sync import sync_to_async
 from django.conf import settings
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import SimpleTestCase, TransactionTestCase
+from django.db import connection
 
 from bot.handlers import create_router
+from modules.delivery.scheduler import run_tick
 from modules.delivery.services import text_parts
 from modules.materials.models import Course, Task, TaskAttachment, Topic
 from modules.repetitions.models import TopicProgress
-from modules.study_sessions.models import Attempt
+from modules.repetitions.services import apply_result
+from modules.study_sessions.models import Attempt, DailyReviewRun, DailySchedule, ReviewQueueItem, StudySession
 from modules.study_sessions.services import current_question
 from modules.users.models import Student
 from modules.users.services import assign_topics
 from tests.test_repetitions import NOW
+from tests.test_daily_reviews import NOW as DAILY_NOW
 
 
 class TextPartsTests(SimpleTestCase):
@@ -37,7 +42,8 @@ class ReviewDeliveryTests(TransactionTestCase):
                       for n, topic in enumerate(self.topics)]
         assign_topics(self.student.pk, [t.pk for t in self.topics], now=NOW)
 
-    async def dispatch(self, text=None, *, chat_type='private', user_id=42, extra=None, fail_at=None):
+    async def dispatch(self, text=None, *, chat_type='private', user_id=42, extra=None, fail_at=None,
+                       now=NOW, tick_during_result=False):
         bot = Bot('123456789:' + 'a' * 35)
         dispatcher = Dispatcher()
         dispatcher.include_router(create_router())
@@ -50,7 +56,12 @@ class ReviewDeliveryTests(TransactionTestCase):
         message.update(extra or {})
         outgoing = []
         async def capture(_bot, method, **kwargs):
+            self.assertFalse(await sync_to_async(lambda: connection.in_atomic_block)())
             outgoing.append(method)
+            if tick_during_result and getattr(method, 'text', None) in ('Верно.', 'Неверно.'):
+                # Answer committed, but the handler has not continued the lesson yet.
+                self.assertEqual(await run_tick(bot, now=DAILY_NOW), 0)
+                self.assertEqual((await sync_to_async(StudySession.objects.get)()).state, 'finished')
             if fail_at and len(outgoing) == fail_at:
                 raise OSError('transport failed secret-reference-0')
             if getattr(method, 'document', None):
@@ -61,7 +72,7 @@ class ReviewDeliveryTests(TransactionTestCase):
                                             'chat': {'id': user_id, 'type': chat_type}})
         try:
             with patch.object(bot.session, 'make_request', side_effect=capture), patch(
-                    'bot.handlers.timezone.now', return_value=NOW):
+                    'bot.handlers.timezone.now', return_value=now):
                 await dispatcher.feed_update(bot, Update.model_validate({'update_id': 1, 'message': message}))
         finally:
             await bot.session.close()
@@ -73,6 +84,66 @@ class ReviewDeliveryTests(TransactionTestCase):
 
     def texts(self, outgoing):
         return [m.text for m in outgoing if getattr(m, 'text', None)]
+
+    async def check_last_answer_with_scheduler(self, response, correct):
+        await sync_to_async(DailySchedule.objects.update_or_create)(pk=1, defaults={'delivery_time': '18:00'})
+        await sync_to_async(assign_topics)(self.student.pk, [self.topics[0].pk], now=DAILY_NOW)
+        before = DAILY_NOW - timedelta(minutes=1)
+        await self.dispatch('/review', now=before)
+        with patch('modules.study_sessions.services.apply_result', wraps=apply_result) as apply:
+            outgoing = self.texts(await self.dispatch(response, now=before, tick_during_result=True))
+        apply.assert_called_once()
+        self.assertEqual(outgoing, ['Верно.' if correct else 'Неверно.',
+            f'Занятие завершено. Ответов: 1; верных: {int(correct)}; неверных: {int(not correct)}.'])
+        self.assertEqual(await sync_to_async(StudySession.objects.count)(), 1)
+        self.assertEqual(await sync_to_async(Attempt.objects.count)(), 1)
+        self.assertEqual(await sync_to_async(ReviewQueueItem.objects.count)(), 1)
+        self.assertEqual(await sync_to_async(DailyReviewRun.objects.count)(), 1)
+        progress = await sync_to_async(TopicProgress.objects.get)(assignment__topic=self.topics[0])
+        self.assertEqual(progress.interval_step, int(correct))
+        self.assertEqual(progress.next_review_date, DAILY_NOW.date() + timedelta(days=1))
+        self.assertIsNone(await sync_to_async(current_question)(self.student.pk))
+
+    async def test_correct_last_answer_with_scheduler_during_result(self):
+        await self.check_last_answer_with_scheduler('secret-reference-0', True)
+
+    async def test_incorrect_last_answer_with_scheduler_during_result(self):
+        await self.check_last_answer_with_scheduler('wrong', False)
+
+    async def test_accumulated_summary_with_scheduler_during_last_result(self):
+        before = DAILY_NOW - timedelta(minutes=1)
+        await sync_to_async(DailySchedule.objects.update_or_create)(pk=1, defaults={'delivery_time': '18:00'})
+        skipped = await sync_to_async(Topic.objects.create)(course=self.course, title='Skipped', order=2)
+        cancelled = await sync_to_async(Topic.objects.create)(course=self.course, title='Cancelled', order=3)
+        last = await sync_to_async(Topic.objects.create)(course=self.course, title='Last', order=4)
+        for topic in (cancelled, last):
+            await sync_to_async(Task.objects.create)(topic=topic, title=topic.title,
+                question=topic.title, answer='last-reference', is_active=True)
+        await sync_to_async(assign_topics)(self.student.pk,
+            [t.pk for t in self.topics] + [skipped.pk, cancelled.pk, last.pk], now=before)
+        await self.dispatch('/review', now=before)
+        await self.dispatch('secret-reference-0', now=before)
+        await self.dispatch('wrong', now=before)  # Skips empty topic, opens cancellable question.
+        await sync_to_async(assign_topics)(self.student.pk,
+            [t.pk for t in self.topics] + [last.pk], now=before)
+        await self.dispatch('late cancelled answer', now=before)
+        snapshot = await sync_to_async(lambda: list(TopicProgress.objects.order_by('pk').values()))()
+        with patch('modules.study_sessions.services.apply_result', wraps=apply_result) as apply:
+            outgoing = self.texts(await self.dispatch('last-reference', now=before, tick_during_result=True))
+        apply.assert_called_once()
+        self.assertEqual(outgoing, ['Верно.', 'Занятие завершено. Ответов: 3; верных: 2; неверных: 1.'
+                                   ' Пропущено тем: 1; отменено: 1.'])
+        self.assertEqual(await sync_to_async(StudySession.objects.count)(), 1)
+        self.assertEqual(await sync_to_async(Attempt.objects.count)(), 4)
+        self.assertEqual(await sync_to_async(ReviewQueueItem.objects.count)(), 5)
+        final = await sync_to_async(lambda: list(TopicProgress.objects.order_by('pk').values()))()
+        last_progress = await sync_to_async(TopicProgress.objects.get)(assignment__topic=last)
+        for old, new in zip(snapshot, final):
+            if old['assignment_id'] == last_progress.assignment_id:
+                self.assertEqual(new['interval_step'], 1)
+                self.assertEqual(new['next_review_date'], DAILY_NOW.date() + timedelta(days=1))
+            else:
+                self.assertEqual(new, old)
 
     async def test_complete_lesson_result_precedes_next_question(self):
         self.assertIn('Question 0', self.texts(await self.dispatch('/review')))
