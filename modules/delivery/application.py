@@ -85,10 +85,9 @@ def _process_event(event, *, now):
             if attempt:
                 recorded.attempt_id, recorded.session_id = attempt.pk, attempt.session_id
                 delivery = QuestionDelivery.objects.filter(attempt=attempt).first()
-                # Legacy unknown deliveries accept ordinary answers. New deliveries
-                # require all parts confirmed; message IDs reject queued fast texts.
-                ready = (delivery is None or (delivery.state == 'delivered' and
-                         (reply_id is not None or event['message_id'] > delivery.last_message_id)))
+                # All parts must be confirmed; message IDs reject queued fast texts.
+                ready = (delivery is not None and delivery.state == 'delivered' and
+                         (reply_id is not None or event['message_id'] > delivery.last_message_id))
                 if not ready:
                     tell('Ответ не принят: дождитесь полной доставки вопроса и ответьте на него через Telegram reply.')
                 else:

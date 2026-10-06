@@ -17,9 +17,9 @@ from modules.materials.models import Course, Task, TaskAttachment, Topic
 from modules.repetitions.models import TopicProgress
 from modules.repetitions.services import apply_result
 from modules.study_sessions.models import Attempt, DailyReviewRun, DailySchedule, ReviewQueueItem, StudySession
-from modules.study_sessions.services import current_question
 from modules.users.models import Student
 from modules.users.services import assign_topics
+from tests.support import current_question
 from tests.test_repetitions import NOW
 from tests.test_daily_reviews import NOW as DAILY_NOW
 

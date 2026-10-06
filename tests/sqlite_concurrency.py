@@ -16,7 +16,8 @@ from modules.users.services import register_student, revoke_invitation, assign_t
 from modules.repetitions.services import apply_result
 from modules.repetitions.models import TopicProgress
 from modules.study_sessions.models import Attempt, DailyReviewRun, ReviewQueueItem
-from modules.study_sessions.services import accept_answer, current_question, form_daily_review, start_review
+from modules.study_sessions.services import accept_answer, form_daily_review, start_review
+from tests.support import current_question
 
 
 def main():

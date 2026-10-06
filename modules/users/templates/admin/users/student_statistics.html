@@ -18,7 +18,7 @@
 </tbody></table>
 <p>Страница {{ history.number }} из {{ history.paginator.num_pages }} {% if history.has_previous %}<a href="?{{ page_query }}&amp;page={{ history.previous_page_number }}">Назад</a>{% endif %} {% if history.has_next %}<a href="?{{ page_query }}&amp;page={{ history.next_page_number }}">Далее</a>{% endif %}</p>
 <h2>Текущий вопрос и доставка</h2>
-{% if current %}<p><a href="{% url 'admin:users_student_attempt' student.pk current.pk %}">Попытка {{ current.pk }}: {{ current.topic_title }}</a>. Доставка: {{ delivery.state|default:"неизвестна (этап 6)" }}; {{ delivery.delivered_at|default:"не подтверждена" }}</p>{% else %}<p>Открытого вопроса нет.</p>{% endif %}
+{% if current %}<p><a href="{% url 'admin:users_student_attempt' student.pk current.pk %}">Попытка {{ current.pk }}: {{ current.topic_title }}</a>. Доставка: {{ delivery.state|default:"неизвестна" }}; {{ delivery.delivered_at|default:"не подтверждена" }}</p>{% else %}<p>Открытого вопроса нет.</p>{% endif %}
 <p>Для восстановления после исправления причины ученик отправляет /review. Это не меняет прогресс.</p>
 <table><thead><tr><th>Отправка</th><th>Попытка</th><th>Состояние</th><th>Число отправок</th><th>Безопасная ошибка</th><th>Следующий повтор (Москва)</th></tr></thead><tbody>
 {% for m in outgoing %}<tr><td>{{ m.pk }} / часть {{ m.part }}</td><td>{{ m.attempt_id|default:"—" }}</td><td>{{ m.get_state_display }}</td><td>{{ m.attempts }}</td><td>{{ m.error_label }}</td><td>{% if m.state == 'failed' %}После исправления и /review{% elif m.state == 'sending' %}Захват до {{ m.lease_until }}{% else %}{{ m.next_attempt_at }}{% endif %}</td></tr>{% endfor %}

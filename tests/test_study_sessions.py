@@ -14,9 +14,10 @@ from modules.materials.models import Course, Task, TaskAttachment, Topic
 from modules.repetitions.models import TopicProgress
 from modules.study_sessions import services
 from modules.study_sessions.models import Attempt, StudySession, TaskCursor
-from modules.study_sessions.services import accept_answer, current_question, start_review
+from modules.study_sessions.services import accept_answer, start_review
 from modules.users.models import Student, StudentTopic
 from modules.users.services import assign_topics
+from tests.support import current_question
 from tests.test_repetitions import NOW
 
 
@@ -86,8 +87,8 @@ class ReviewTests(TestCase):
     def test_overdue_and_midnight_resume_and_fresh_module(self):
         question = self.open(NOW + timedelta(days=10)).question
         self.assertEqual(self.open(NOW + timedelta(days=20)).question, question)
-        reloaded = reload(services)
-        self.assertEqual(asdict(reloaded.current_question(self.student.pk)), asdict(question))
+        reload(services)
+        self.assertEqual(asdict(current_question(self.student.pk)), asdict(question))
         self.assertEqual(Attempt.objects.count(), 1)
         self.assertEqual(TopicProgress.objects.get(assignment=self.assignment).next_review_date, date(2026, 9, 21))
         self.accept(question, now=NOW + timedelta(days=20))

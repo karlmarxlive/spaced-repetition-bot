@@ -19,7 +19,6 @@ class IncomingEvent(models.Model):
 
 class QuestionDelivery(models.Model):
     attempt = models.OneToOneField('study_sessions.Attempt', on_delete=models.PROTECT)
-    # Absent row means unknown stage-6 delivery. New questions always get a row.
     state = models.CharField(max_length=12, default='pending')
     delivered_at = models.DateTimeField(null=True)
     last_message_id = models.BigIntegerField(null=True)

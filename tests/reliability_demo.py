@@ -82,10 +82,18 @@ def main():
             for model, rows in snapshot.items():
                 assert list(model.objects.order_by('pk').values()) == rows
             assert not OutgoingMessage.objects.exists() and not QuestionDelivery.objects.exists()
-            # Unknown legacy delivery permits continuation without permanent lockout.
+            # An unknown legacy delivery is not answerable until /review resends it.
             process_event(event(1), now=daily_review_time)
-            assert Attempt.objects.get(pk=repeated.attempt_id).status == 'correct'
+            assert Attempt.objects.get(pk=repeated.attempt_id).status == 'open'
             assert IncomingEvent.objects.get(update_id=1).attempt_id == repeated.attempt_id
+            process_event(event(2, 'review'), now=daily_review_time)
+            sent_id = 1000
+            while part := claim(bot_id=BOT_ID, now=daily_review_time, chat_id=42):
+                sent_id += 1
+                finish(part, now=daily_review_time, message_id=sent_id)
+            assert QuestionDelivery.objects.get(attempt_id=repeated.attempt_id).state == 'delivered'
+            process_event(event(3, message_id=sent_id + 1), now=daily_review_time)
+            assert Attempt.objects.get(pk=repeated.attempt_id).status == 'correct'
             with connection.cursor() as cursor:
                 cursor.execute("SELECT name FROM sqlite_master WHERE type='trigger'")
                 names = {row[0] for row in cursor.fetchall()}

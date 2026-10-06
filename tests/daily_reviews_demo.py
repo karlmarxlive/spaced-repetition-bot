@@ -8,9 +8,10 @@ from django.db import connections
 
 from modules.materials.models import Course, Task, Topic
 from modules.study_sessions.models import Attempt, DailyReviewRun, ReviewQueueItem
-from modules.study_sessions.services import accept_answer, continue_review, current_question, form_daily_review
+from modules.study_sessions.services import accept_answer, continue_review, form_daily_review
 from modules.users.models import Student
 from modules.users.services import assign_topics
+from tests.support import current_question
 from tests.test_daily_reviews import NOW
 
 

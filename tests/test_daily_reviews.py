@@ -18,10 +18,10 @@ from modules.delivery.scheduler import run_scheduler, run_tick
 from modules.materials.models import Course, Task, TaskAttachment, Topic
 from modules.repetitions.models import TopicProgress
 from modules.study_sessions.models import Attempt, DailyReviewRun, DailySchedule, ReviewQueueItem, StudySession
-from modules.study_sessions.services import (accept_answer, continue_review, current_question,
-                                            form_daily_review, start_review)
+from modules.study_sessions.services import accept_answer, continue_review, form_daily_review, start_review
 from modules.users.models import Student
 from modules.users.services import assign_topics
+from tests.support import current_question
 
 NOW = datetime(2026, 9, 26, 15, tzinfo=timezone.utc)  # 18:00 Moscow
 

@@ -54,11 +54,6 @@ def student_for_telegram(telegram_id):
     return Student.objects.filter(telegram_id=telegram_id).values_list("pk", flat=True).first()
 
 
-def current_question(student_id):
-    attempt = Attempt.objects.filter(student_id=student_id, status="open").first()
-    return _question(attempt) if attempt else None
-
-
 def _lock_student(student_id):
     # Acquire SQLite writer lock before reading a snapshot. No network inside atomic.
     if not Student.objects.filter(pk=student_id).update(display_name=F("display_name")):

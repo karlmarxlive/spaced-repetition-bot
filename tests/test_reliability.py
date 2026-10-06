@@ -26,6 +26,7 @@ from modules.delivery.outbox import claim, classify, drain, finish, MAX_ATTEMPTS
 from modules.materials.models import Course, Task, TaskAttachment, Topic
 from modules.repetitions.models import TopicProgress
 from modules.study_sessions.models import Attempt, DailyReviewRun, DailySchedule, StudySession
+from modules.study_sessions.services import start_review
 from modules.users.models import Invitation, Student
 from modules.users.services import assign_topics
 from tests.test_daily_reviews import NOW
@@ -147,6 +148,15 @@ class AtomicCycleTests(LessonFixture, TestCase):
         self.assertEqual(Attempt.objects.filter(status='correct').count(), 1)
         self.process(event(5, message_id=500))
         self.assertEqual(Attempt.objects.filter(status='correct').count(), 2)
+
+    def test_question_without_delivery_record_requires_review(self):
+        question = start_review(self.student.pk, now=NOW).question
+        self.process(event(1, message_id=100))
+        self.assertEqual(Attempt.objects.get(pk=question.attempt_id).status, 'open')
+        self.process(event(2, 'review'))
+        last_id = self.confirm()
+        self.process(event(3, message_id=last_id + 1))
+        self.assertEqual(Attempt.objects.get(pk=question.attempt_id).status, 'correct')
 
     def test_reply_to_old_unknown_foreign_and_partial_question_is_rejected(self):
         self.process(event(1, 'review'))

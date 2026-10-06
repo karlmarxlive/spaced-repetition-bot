@@ -162,7 +162,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
                 dispatcher.start_polling = AsyncMock(side_effect=failure)
                 with patch("bot.__main__.AiohttpSession", return_value=session), \
                      patch("bot.__main__.Bot"), \
-                     patch("bot.__main__.Dispatcher", return_value=dispatcher):
+                     patch("bot.__main__.ReliableDispatcher", return_value=dispatcher):
                     if failure is None:
                         await run(TOKEN)
                     else:
@@ -171,7 +171,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
                 session.__aexit__.assert_awaited_once()
 
     async def test_getme_only(self):
-        with patch("bot.__main__.Bot") as bot_class, patch("bot.__main__.Dispatcher") as dispatcher:
+        with patch("bot.__main__.Bot") as bot_class, patch("bot.__main__.ReliableDispatcher") as dispatcher:
             bot_class.return_value.get_me = AsyncMock()
             await run(TOKEN, check=True)
             bot_class.return_value.get_me.assert_awaited_once()

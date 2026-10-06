@@ -5,7 +5,7 @@ import logging.config
 import os
 
 from aiogram import Bot
-from bot.polling import ReliableDispatcher as Dispatcher
+from bot.polling import ReliableDispatcher
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.exceptions import TelegramNetworkError, TelegramUnauthorizedError
 from aiogram.utils.token import TokenValidationError
@@ -34,7 +34,7 @@ async def run(token, check=False):
             return result
 
         session.middleware(activity)
-        dispatcher = Dispatcher()
+        dispatcher = ReliableDispatcher()
         from bot.handlers import create_router
 
         dispatcher.include_router(create_router())

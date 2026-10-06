@@ -25,7 +25,7 @@ def _candidates(now):
     if now.astimezone(MOSCOW).time() < DailySchedule.objects.get(pk=1).delivery_time:
         return []
     processed = DailyReviewRun.objects.filter(local_date=today).values("student_id")
-    return list(Student.objects.exclude(pk__in=processed).order_by("pk").values_list("pk", "telegram_id"))
+    return list(Student.objects.exclude(pk__in=processed).order_by("pk").values_list("pk", flat=True))
 
 
 def _form(student_id, now, bot_id):
@@ -37,7 +37,7 @@ async def run_tick(bot, *, now, live_delivery=False):
     """Form daily state and independently recover pending delivery on every tick."""
     formed = 0
     failed = False
-    for student_id, telegram_id in await sync_to_async(_candidates, thread_sensitive=True)(now):
+    for student_id in await sync_to_async(_candidates, thread_sensitive=True)(now):
         try:
             formed += await sync_to_async(_form, thread_sensitive=True)(student_id, now, bot.id)
         except Exception as error:
