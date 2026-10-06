@@ -6,6 +6,43 @@ import run_dev
 
 
 class DevLauncherTests(unittest.TestCase):
+    def setUp(self):
+        self.check = patch("run_dev.subprocess.run", return_value=Mock(returncode=0)).start()
+        self.addCleanup(patch.stopall)
+
+    @patch("run_dev.stop_processes")
+    @patch("run_dev.signal.signal")
+    @patch("run_dev.subprocess.Popen")
+    @patch("sys.argv", ["run_dev.py"])
+    def test_pending_migrations_prevent_service_start(self, popen, signal_handler, stop):
+        self.check.side_effect = [Mock(returncode=0), Mock(returncode=1)]
+        self.assertEqual(run_dev.main(), 1)
+        self.assertEqual(self.check.call_args.args[0][1:], ["manage.py", "migrate", "--check"])
+        popen.assert_not_called()
+        stop.assert_called_once_with([])
+
+    @patch("run_dev.stop_processes")
+    @patch("run_dev.signal.signal")
+    @patch("run_dev.subprocess.Popen")
+    @patch("sys.argv", ["run_dev.py"])
+    def test_missing_dependencies_prevent_service_start(self, popen, signal_handler, stop):
+        self.check.return_value.returncode = 1
+        self.assertEqual(run_dev.main(), 1)
+        self.assertEqual(self.check.call_count, 1)
+        popen.assert_not_called()
+
+    @patch("run_dev.os.name", "posix")
+    @patch("run_dev.Path.is_file")
+    def test_linux_selects_separate_environment(self, is_file):
+        is_file.return_value = True
+        self.assertEqual(run_dev.project_python(), str(run_dev.BASE_DIR / ".venv-wsl/bin/python"))
+
+    @patch("run_dev.os.name", "nt")
+    @patch("run_dev.Path.is_file")
+    def test_windows_selects_windows_environment(self, is_file):
+        is_file.return_value = True
+        self.assertEqual(run_dev.project_python(), str(run_dev.BASE_DIR / ".venv/Scripts/python.exe"))
+
     @patch("run_dev.stop_processes")
     @patch("run_dev.signal.signal")
     @patch("run_dev.subprocess.Popen")
