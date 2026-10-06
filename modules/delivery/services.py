@@ -1,4 +1,4 @@
-"""Reference-free text formatting shared by transactional delivery."""
+"""Telegram message size limits for transactional delivery."""
 
 def text_parts(text, limit=4096):
     """Preserve every character; count UTF-16 units conservatively for Telegram."""
@@ -12,14 +12,3 @@ def text_parts(text, limit=4096):
         units += size
     if part:
         yield "".join(part)
-
-
-RESULT_TEXT = {
-    "correct": "Верно.",
-    "incorrect": "Неверно.",
-    "unavailable": "Проверка сейчас недоступна. Ответ не принят; попробуйте позже.",
-    "text_required": "Отправьте ответ обычным непустым текстом.",
-    "no_attempt": "Нет открытого задания. Начните с /review.",
-    "closed": "Этот ответ уже принят. Для продолжения используйте /review.",
-    "cancelled": "Задание отменено: тема отключена. Ответ не засчитан.",
-}

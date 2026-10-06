@@ -48,19 +48,23 @@ docker exec "$container" python -m deploy.smoke --data
 docker exec "$container" python -c 'from pathlib import Path; Path("/data/media/fixture.txt").write_text("persisted across containers")'
 docker exec "$container" python -m deploy.probe
 # Save semantic state, including the open lesson, queue and outbox, before stop.
-docker exec "$container" python -c 'import django,json; django.setup(); from modules.study_sessions.models import Attempt,StudySession,ReviewQueueItem; from modules.delivery.models import OutgoingMessage; from modules.repetitions.models import TopicProgress; from pathlib import Path; models=[Attempt,StudySession,ReviewQueueItem,OutgoingMessage,TopicProgress]; snapshot={m._meta.label:list(m.objects.order_by("pk").values()) for m in models}; Path("/data/expected.json").write_text(json.dumps(snapshot,default=str))'
+docker exec "$container" python -m deploy.smoke --save-state /data/expected.json
 docker stop --time 30 "$container" >/dev/null
 [ "$(docker inspect -f '{{.State.ExitCode}}' "$container")" = 0 ]
 docker rm "$container" >/dev/null
 container_created=0
 start_container
 docker exec "$container" python -m deploy.probe
-docker exec "$container" python -c 'import django,json; django.setup(); from modules.study_sessions.models import Attempt,StudySession,ReviewQueueItem; from modules.delivery.models import OutgoingMessage; from modules.repetitions.models import TopicProgress; from modules.materials.models import Course; from pathlib import Path; models=[Attempt,StudySession,ReviewQueueItem,OutgoingMessage,TopicProgress]; actual=json.loads(json.dumps({m._meta.label:list(m.objects.order_by("pk").values()) for m in models},default=str)); assert actual==json.loads(Path("/data/expected.json").read_text()); assert Course.objects.get().title=="After"; assert Path("/data/media/fixture.txt").read_text()=="persisted across containers"; assert list(Path("/external").glob("*.tar.gz")); print("Docker named-volume recreation: history, open lesson, queue, progress, outbox and media OK")'
+docker exec "$container" python -m deploy.smoke --verify-state /data/expected.json
+docker exec "$container" sh -c 'ls /external/*.tar.gz' >/dev/null
+printf '%s\n' 'Docker named-volume recreation: OK'
 docker stop --time 30 "$container" >/dev/null
 [ "$(docker inspect -f '{{.State.ExitCode}}' "$container")" = 0 ]
 docker rm "$container" >/dev/null
 container_created=0
 # /external is a second test volume, simulating an independently mounted backup
 # destination. Real off-site upload remains a deployment acceptance check.
-docker run --rm "${runtime_env[@]}" -v "$volume:/original:ro" -v "$restore_volume:/data" --entrypoint python "$image" -c 'from pathlib import Path; import subprocess; archive=sorted(Path("/data").glob("*.tar.gz"))[-1]; subprocess.run(["python","-m","deploy.supervisor","restore","--archive",str(archive)],check=True); import django,json; django.setup(); from modules.study_sessions.models import Attempt,StudySession,ReviewQueueItem; from modules.delivery.models import OutgoingMessage; from modules.repetitions.models import TopicProgress; from modules.materials.models import Course; models=[Attempt,StudySession,ReviewQueueItem,OutgoingMessage,TopicProgress]; actual=json.loads(json.dumps({m._meta.label:list(m.objects.order_by("pk").values()) for m in models},default=str)); assert actual==json.loads(Path("/original/expected.json").read_text()); assert Course.objects.get().title=="After"; assert Path("/data/media/fixture.txt").read_text()=="persisted across containers"; print("Docker backup restore into separate volume: OK")'
+docker run --rm "${runtime_env[@]}" -v "$volume:/original:ro" -v "$restore_volume:/data" --entrypoint sh "$image" -c \
+    'python -m deploy.supervisor restore --archive "$(ls /data/*.tar.gz | sort | tail -n 1)" && python -m deploy.smoke --verify-state /original/expected.json'
+printf '%s\n' 'Docker backup restore into separate volume: OK'
 printf '%s\n' 'All Docker stage 8 checks passed.'

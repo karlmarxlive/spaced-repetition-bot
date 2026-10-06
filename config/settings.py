@@ -44,7 +44,10 @@ TEMPLATES = [{
     ]},
 }]
 WSGI_APPLICATION = "config.wsgi.application"
-DATABASES = {"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": os.environ.get("DJANGO_DB_PATH", BASE_DIR / "db.sqlite3")}}
+# Every atomic() takes SQLite's writer lock at BEGIN: a deferred read transaction
+# could otherwise fail to upgrade to a writer under contention.
+DATABASES = {"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": os.environ.get("DJANGO_DB_PATH", BASE_DIR / "db.sqlite3"),
+                         "OPTIONS": {"timeout": 20, "transaction_mode": "IMMEDIATE"}}}
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation." + validator}
     for validator in ["UserAttributeSimilarityValidator", "MinimumLengthValidator",

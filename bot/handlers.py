@@ -4,7 +4,6 @@ from aiogram.types import Message, Update
 from asgiref.sync import sync_to_async
 from django.utils import timezone
 
-from bot.texts import REPLIES, START_TEXT
 from modules.delivery.application import process_event
 from modules.delivery.outbox import drain
 

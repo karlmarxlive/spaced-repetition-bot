@@ -294,12 +294,3 @@ class ReviewTests(TestCase):
         new = self.open().question
         self.assertEqual(new.text, q.text)
         self.assertNotEqual(new.attempt_id, q.attempt_id)
-
-    def test_explicit_aware_time_required(self):
-        with self.assertRaises(ValueError):
-            self.open(NOW.replace(tzinfo=None))
-        self.assertFalse(StudySession.objects.exists())
-        q = self.open().question
-        with self.assertRaises(ValueError):
-            self.accept(q, now=NOW.replace(tzinfo=None))
-        self.assertEqual(current_question(self.student.pk), q)

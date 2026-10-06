@@ -1,3 +1,4 @@
+import io
 import subprocess
 import unittest
 from unittest.mock import Mock, patch
@@ -8,6 +9,9 @@ import run_dev
 class DevLauncherTests(unittest.TestCase):
     def setUp(self):
         self.check = patch("run_dev.subprocess.run", return_value=Mock(returncode=0)).start()
+        # Launcher messages are for a terminal user, not for the test report.
+        patch("sys.stdout", new_callable=io.StringIO).start()
+        patch("sys.stderr", new_callable=io.StringIO).start()
         self.addCleanup(patch.stopall)
 
     @patch("run_dev.stop_processes")

@@ -3,12 +3,17 @@
 import logging
 import os
 import re
+import sqlite3
 import traceback
 
 
 def log_failure(logger, message, error):
-    """Keep failure type and code locations, without exception text or local data."""
-    logger.error("%s (%s)\n%s", message, type(error).__name__,
+    """Keep failure type and code locations, without exception text or local data.
+
+    SQLite messages are kept: they name constraints, tables or locks, not values.
+    """
+    sqlite = isinstance(error, sqlite3.Error) or isinstance(error.__cause__, sqlite3.Error)
+    logger.error("%s (%s%s)\n%s", message, type(error).__name__, f": {error}" if sqlite else "",
                  "".join(f"  {frame.filename}:{frame.lineno} in {frame.name}\n"
                          for frame in traceback.extract_tb(error.__traceback__)))
 

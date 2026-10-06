@@ -3,7 +3,6 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 
 from django.db import transaction
-from django.db.models import F
 
 from modules.checking.services import Checker, check_exact
 from modules.materials.models import Task
@@ -52,12 +51,6 @@ def _question(attempt):
 
 def student_for_telegram(telegram_id):
     return Student.objects.filter(telegram_id=telegram_id).values_list("pk", flat=True).first()
-
-
-def _lock_student(student_id):
-    # Acquire SQLite writer lock before reading a snapshot. No network inside atomic.
-    if not Student.objects.filter(pk=student_id).update(display_name=F("display_name")):
-        raise Student.DoesNotExist
 
 
 def _choose_task(assignment_id, topic_id):
@@ -149,8 +142,6 @@ def _advance(session, *, now):
 @transaction.atomic
 def start_review(student_id, *, now):
     """Explicit /review: append currently due topics and show the current question."""
-    moscow_date(now)
-    _lock_student(student_id)
     session = _session(student_id, now)
     _enqueue(session, now=now)
     return _advance(session, now=now)
@@ -163,8 +154,6 @@ def continue_review(student_id, *, now, session_id=None):
     Only explicit manual/daily starts can create a session. A finished session
     identified by the accepted answer returns its summary even after a new start.
     """
-    moscow_date(now)
-    _lock_student(student_id)
     sessions = StudySession.objects.filter(student_id=student_id)
     session = (sessions.filter(pk=session_id) if session_id is not None
                else sessions.filter(state="open")).first()
@@ -175,7 +164,6 @@ def continue_review(student_id, *, now, session_id=None):
 def form_daily_review(student_id, *, now):
     """At most one batch per Moscow day. Existing questions are never resent."""
     today = moscow_date(now)
-    _lock_student(student_id)
     schedule = DailySchedule.objects.get(pk=1)
     if now.astimezone(MOSCOW).time() < schedule.delivery_time:
         return Review("idle")
@@ -197,8 +185,6 @@ def form_daily_review(student_id, *, now):
 @transaction.atomic
 def accept_answer(student_id, attempt_id, response, *, now, checker: Checker = check_exact):
     """Accept one specifically identified attempt; repeated completion is a no-op."""
-    moscow_date(now)
-    _lock_student(student_id)
     attempt = Attempt.objects.filter(pk=attempt_id, student_id=student_id).select_related("assignment").first()
     if attempt is None:
         return Review("no_attempt")

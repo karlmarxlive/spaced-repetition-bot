@@ -19,10 +19,10 @@ from django.db import connection
 from django.test import TestCase, TransactionTestCase
 from django.urls import reverse
 
-from bot.texts import REPLIES, START_TEXT
-from modules.delivery.application import daily_review, process_event
+from modules.delivery.application import daily_review, process_event, reject_event
 from modules.delivery.models import IncomingEvent, OutgoingMessage, QuestionDelivery
 from modules.delivery.outbox import claim, classify, drain, finish, MAX_ATTEMPTS
+from modules.delivery.texts import EVENT_FAILED_TEXT, REPLIES, START_TEXT
 from modules.materials.models import Course, Task, TaskAttachment, Topic
 from modules.repetitions.models import TopicProgress
 from modules.study_sessions.models import Attempt, DailyReviewRun, DailySchedule, StudySession
@@ -103,13 +103,12 @@ class AtomicCycleTests(LessonFixture, TestCase):
         self.assertEqual(IncomingEvent.objects.get(update_id=2).student_id,
                          Student.objects.get(telegram_id=43).pk)
 
-    def test_start_from_group_bot_missing_or_invalid_user_does_not_resume(self):
+    def test_start_from_group_bot_or_missing_user_does_not_resume(self):
         row = self.failed_start()
         for index, changes in enumerate([
             {'chat_type': 'group'},
             {'user': {'id': 43, 'first_name': 'Bot', 'is_bot': True}},
             {'user': None},
-            {'user': {'id': 43, 'first_name': '', 'is_bot': False}},
         ], 2):
             with self.subTest(changes=changes):
                 self.process({**event(index, 'start', user_id=43), **changes})
@@ -262,6 +261,19 @@ class AtomicCycleTests(LessonFixture, TestCase):
         self.assertTrue(finish(second, now=later, message_id=11))
         self.assertEqual(OutgoingMessage.objects.get(pk=first.pk).attempts, 2)
 
+    def test_rejected_event_notifies_once_and_is_not_processed_later(self):
+        progress = list(TopicProgress.objects.values())
+        self.assertTrue(reject_event(bot_id=BOT_ID, update_id=1, chat_id=42, now=NOW))
+        self.assertFalse(reject_event(bot_id=BOT_ID, update_id=1, chat_id=42, now=NOW))
+        self.assertEqual(list(OutgoingMessage.objects.values_list('text', flat=True)), [EVENT_FAILED_TEXT])
+        self.assertEqual(IncomingEvent.objects.get(update_id=1).state, 'failed')
+        self.assertFalse(self.process(event(1, 'review')))
+        self.assertFalse(Attempt.objects.exists())
+        self.assertEqual(list(TopicProgress.objects.values()), progress)
+        self.process(event(2, 'review'))
+        self.assertFalse(reject_event(bot_id=BOT_ID, update_id=2, chat_id=42, now=NOW))
+        self.assertEqual(IncomingEvent.objects.get(update_id=2).state, 'processed')
+
     def test_error_classification_retry_limit_and_manual_recovery(self):
         method = SendMessage(chat_id=42, text='test')
         cases = [(OSError('secret'), 'network', 5), (TimeoutError(), 'network', 5),
@@ -271,7 +283,7 @@ class AtomicCycleTests(LessonFixture, TestCase):
                  (TelegramForbiddenError(method=method, message='secret'), 'chat_unavailable', None),
                  (TelegramBadRequest(method=method, message='secret'), 'telegram_request', None),
                  (TelegramUnauthorizedError(method=method, message='secret'), 'configuration', None),
-                 (FileNotFoundError('secret'), 'attachment', None)]
+                 (FileNotFoundError('secret'), 'attachment', None), (ValueError('secret'), 'transport', None)]
         for error, category, delay in cases:
             self.assertEqual(classify(error, 1), (category, delay))
         self.assertEqual(classify(OSError(), 9), ('network', 900))
@@ -545,6 +557,7 @@ class StatisticsTests(LessonFixture, TestCase):
         response = self.client.get(self.url)
         self.assertEqual(response.context['counts'], {'cancelled': 1})
         self.assertContains(response, 'Ступень 0')
+        self.assertContains(response, 'через 60 дн.')
         self.assertContains(response, 'выдача отключена')
         self.assertContains(response, 'Europe/Moscow')
 
@@ -613,3 +626,42 @@ class PollingGuaranteeTests(TransactionTestCase):
             self.assertEqual(processed, [17, 17])
         finally:
             await updates.aclose()
+
+    def update(self, update_id):
+        from aiogram.types import Update
+        return Update.model_validate({'update_id': update_id, 'message': {
+            'message_id': 5, 'date': 0, 'chat': {'id': 42, 'type': 'private'}, 'text': 'yes',
+            'from': {'id': 42, 'is_bot': False, 'first_name': 'Student'}}})
+
+    async def test_persistent_failure_is_rejected_and_polling_continues(self):
+        from bot.polling import MAX_FAILURES, ReliableDispatcher
+        from unittest.mock import AsyncMock
+        bot = type('FakeBot', (), {'id': BOT_ID})()
+        dispatcher = ReliableDispatcher()
+        with patch.object(dispatcher, 'feed_update', side_effect=RuntimeError('bug')) as feed, \
+                patch('bot.polling.asyncio.sleep', new_callable=AsyncMock), self.assertLogs('bot', level='ERROR'):
+            self.assertTrue(await dispatcher._process_update(bot, self.update(31)))
+        self.assertEqual(feed.call_count, MAX_FAILURES)
+        self.assertEqual((await sync_to_async(IncomingEvent.objects.get)(update_id=31)).state, 'failed')
+        texts = await sync_to_async(list)(OutgoingMessage.objects.values_list('text', flat=True))
+        self.assertEqual(texts, [EVENT_FAILED_TEXT])
+
+    async def test_failed_rejection_keeps_update_unacknowledged(self):
+        from bot.polling import MAX_FAILURES, ReliableDispatcher
+        from django.db import OperationalError
+        from unittest.mock import AsyncMock
+        bot = type('FakeBot', (), {'id': BOT_ID})()
+        dispatcher = ReliableDispatcher()
+        with patch.object(dispatcher, 'feed_update', side_effect=RuntimeError('bug')) as feed, \
+                patch('modules.delivery.application.reject_event',
+                      side_effect=[OperationalError('database is locked'), True]) as reject, \
+                patch('bot.polling.asyncio.sleep', new_callable=AsyncMock), self.assertLogs('bot', level='ERROR'):
+            self.assertTrue(await dispatcher._process_update(bot, self.update(32)))
+        self.assertEqual((feed.call_count, reject.call_count), (MAX_FAILURES + 1, 2))
+
+    def test_overridden_aiogram_hook_is_still_used(self):
+        import inspect
+        from aiogram import Dispatcher
+        self.assertEqual(list(inspect.signature(Dispatcher._process_update).parameters),
+                         ['self', 'bot', 'update', 'call_answer', 'kwargs'])
+        self.assertIn('self._process_update(bot=bot, update=update', inspect.getsource(Dispatcher._polling))

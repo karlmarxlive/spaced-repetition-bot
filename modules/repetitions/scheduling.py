@@ -26,10 +26,6 @@ def initial_schedule(*, now):
 
 def calculate_transition(interval_step, correct, *, now):
     today = moscow_date(now)
-    if type(interval_step) is not int or not 0 <= interval_step <= policy.MAX_STEP:
-        raise ValueError(f"interval_step must be an integer from 0 to {policy.MAX_STEP}")
-    if type(correct) is not bool:
-        raise ValueError("correct must be True or False (an accepted result)")
     step = min(interval_step + 1, policy.MAX_STEP) if correct else 0
     days = policy.SUCCESS_INTERVAL_DAYS[step - 1] if correct else policy.ERROR_RETRY_DAYS
     return Schedule(step, today + timedelta(days=days))

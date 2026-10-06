@@ -1,5 +1,6 @@
 """Daily batch orchestration. No polling, no network inside DB transactions."""
 import asyncio
+from datetime import timedelta
 import logging
 
 from aiogram.exceptions import TelegramUnauthorizedError
@@ -17,6 +18,7 @@ from modules.study_sessions.models import DailyReviewRun, DailySchedule
 from modules.users.models import Student
 
 logger = logging.getLogger(__name__)
+STUDENT_RETRY_SECONDS = 60
 
 
 def _candidates(now):
@@ -33,18 +35,28 @@ def _form(student_id, now, bot_id):
     return daily_review(student_id, now=now, bot_id=bot_id)
 
 
-async def run_tick(bot, *, now, live_delivery=False):
-    """Form daily state and independently recover pending delivery on every tick."""
+async def run_tick(bot, *, now, live_delivery=False, retry_at=None):
+    """Form daily state and independently recover pending delivery on every tick.
+
+    retry_at keeps failed students between ticks: they are retried after a pause.
+    """
+    retry_at = {} if retry_at is None else retry_at
     formed = 0
-    failed = False
-    for student_id in await sync_to_async(_candidates, thread_sensitive=True)(now):
+    candidates = await sync_to_async(_candidates, thread_sensitive=True)(now)
+    for student_id in set(retry_at) - set(candidates):
+        del retry_at[student_id]
+    for student_id in candidates:
+        if retry_at.get(student_id, now) > now:
+            continue
         try:
             formed += await sync_to_async(_form, thread_sensitive=True)(student_id, now, bot.id)
+            retry_at.pop(student_id, None)
         except Exception as error:
-            failed = True
-            log_failure(logger, f"Ошибка ежедневной выдачи ученику {student_id}", error)
+            retry_at[student_id] = now + timedelta(seconds=STUDENT_RETRY_SECONDS)
+            log_failure(logger, f"Ошибка ежедневной выдачи ученику {student_id}; повтор через "
+                                f"{STUDENT_RETRY_SECONDS} секунд", error)
     await drain(bot, now=None if live_delivery else now)
-    if failed:
+    if retry_at:
         fail_once("scheduler-error")
     else:
         clear("scheduler-error")
@@ -52,9 +64,10 @@ async def run_tick(bot, *, now, live_delivery=False):
 
 
 async def run_scheduler(bot, *, once=False):
+    retry_at = {}
     while True:
         try:
-            await run_tick(bot, now=timezone.now(), live_delivery=True)
+            await run_tick(bot, now=timezone.now(), live_delivery=True, retry_at=retry_at)
             mark("scheduler")
         except TelegramUnauthorizedError:
             raise

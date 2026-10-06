@@ -1,11 +1,10 @@
 """Atomic incoming update -> lesson transition -> persistent outgoing parts."""
-from django.db import OperationalError, transaction
-from django.db.models import F
+from django.db import transaction
 
-from bot.texts import REPLIES, START_TEXT
 from modules.delivery.models import IncomingEvent, OutgoingMessage, QuestionDelivery
 from modules.delivery.outbox import database_retry, enqueue_review, enqueue_text, resume_chat
-from modules.delivery.services import RESULT_TEXT
+from modules.delivery.texts import (EVENT_FAILED_TEXT, GROUP_CHAT_TEXT, GROUP_START_TEXT, REPLIES, RESULT_TEXT,
+                                   STALE_REPLY_TEXT, START_TEXT, UNDELIVERED_TEXT, UNSUPPORTED_TEXT)
 from modules.study_sessions.models import Attempt
 from modules.study_sessions.services import (accept_answer, continue_review, form_daily_review,
                                             has_pending_cancellation, start_review, student_for_telegram)
@@ -18,14 +17,31 @@ def process_event(event, *, now):
     return database_retry(_process_event, event, now=now)
 
 
+def reject_event(*, bot_id, update_id, chat_id, now):
+    """Give up on an update that keeps failing: no study changes, one notice to the chat."""
+    return database_retry(_reject_event, bot_id=bot_id, update_id=update_id, chat_id=chat_id, now=now)
+
+
+@transaction.atomic
+def _reject_event(*, bot_id, update_id, chat_id, now):
+    recorded, created = IncomingEvent.objects.get_or_create(bot_id=bot_id, update_id=update_id,
+                                                          defaults={'received_at': now})
+    if not created:
+        return False
+    recorded.state, recorded.processed_at = 'failed', now
+    recorded.save()
+    if chat_id is not None:
+        enqueue_text(text=EVENT_FAILED_TEXT, bot_id=bot_id, chat_id=chat_id,
+                     operation=f'update:{bot_id}:{update_id}', now=now)
+    return True
+
+
 @transaction.atomic
 def _process_event(event, *, now):
     bot_id, update_id, chat_id = event['bot_id'], event['update_id'], event['chat_id']
-    # First statement takes SQLite's writer lock even when the update is absent.
-    IncomingEvent.objects.filter(bot_id=bot_id, update_id=update_id).update(bot_id=F('bot_id'))
     recorded, created = IncomingEvent.objects.get_or_create(bot_id=bot_id, update_id=update_id,
                                                           defaults={'received_at': now})
-    if not created and recorded.state == 'processed':
+    if not created and recorded.state in ('processed', 'failed'):
         return False
     operation = f'update:{bot_id}:{update_id}'
     common = dict(bot_id=bot_id, chat_id=chat_id, operation=operation, now=now)
@@ -42,17 +58,13 @@ def _process_event(event, *, now):
     user = event.get('user')
     kind = event['kind']
     if event['chat_type'] != 'private':
-        tell('Для регистрации откройте ссылку учителя в личном чате с ботом.' if kind == 'start'
-             else 'Для занятия откройте бота в личном чате.')
+        tell(GROUP_START_TEXT if kind == 'start' else GROUP_CHAT_TEXT)
     elif not user or user.get('is_bot'):
         tell(REPLIES['invalid'])
     elif kind == 'start':
         result = register_student(telegram_id=user['id'], first_name=user['first_name'],
             last_name=user.get('last_name'), username=user.get('username'), payload=event.get('payload'))
-        if result.status == 'busy':
-            raise OperationalError('database locked')
-        if result.status != 'invalid':
-            resume_chat(bot_id, chat_id, now=now)
+        resume_chat(bot_id, chat_id, now=now)
         recorded.student_id = result.student_id
         common['student_id'] = result.student_id
         tell(REPLIES[result.status])
@@ -65,7 +77,7 @@ def _process_event(event, *, now):
             resume_chat(bot_id, chat_id, now=now)
             show(start_review(student_id, now=now), manual=True)
         elif kind == 'unsupported':
-            tell('Используйте /review для занятия; ответ отправляйте обычным текстом без вложений.')
+            tell(UNSUPPORTED_TEXT)
         else:
             attempt = Attempt.objects.filter(student_id=student_id, status='open').first()
             reply_id = event.get('reply_id')
@@ -75,7 +87,7 @@ def _process_event(event, *, now):
                 if linked:
                     recorded.attempt_id, recorded.session_id = linked.attempt_id, linked.session_id
                 if not linked or not attempt or linked.attempt_id != attempt.pk:
-                    tell('Ответ на старое или неизвестное задание не принят. Откройте текущий вопрос через /review.')
+                    tell(STALE_REPLY_TEXT)
                     attempt = None
             elif attempt is None:
                 if has_pending_cancellation(student_id):
@@ -89,7 +101,7 @@ def _process_event(event, *, now):
                 ready = (delivery is not None and delivery.state == 'delivered' and
                          (reply_id is not None or event['message_id'] > delivery.last_message_id))
                 if not ready:
-                    tell('Ответ не принят: дождитесь полной доставки вопроса и ответьте на него через Telegram reply.')
+                    tell(UNDELIVERED_TEXT)
                 else:
                     result = accept_answer(student_id, attempt.pk, event.get('text'), now=now)
                     tell(RESULT_TEXT[result.status])

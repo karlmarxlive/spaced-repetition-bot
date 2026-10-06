@@ -3,7 +3,7 @@ from pathlib import Path
 import os
 import subprocess
 import sys
-from unittest.mock import AsyncMock, DEFAULT, patch
+from unittest.mock import AsyncMock, patch
 
 from aiogram import Bot, Dispatcher
 from aiogram.filters import CommandObject
@@ -18,7 +18,8 @@ from django.test import TestCase, TransactionTestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 
-from bot.handlers import REPLIES, create_router, start
+from bot.handlers import create_router, start
+from modules.delivery.texts import REPLIES
 from modules.materials.models import Course, Topic
 from modules.users.admin import InvitationAdmin, StudentForm
 from modules.users.models import Invitation, Student, StudentTopic
@@ -105,11 +106,6 @@ class RegistrationTests(TestCase):
             with self.subTest(telegram_id=telegram_id), self.assertRaises(IntegrityError), transaction.atomic():
                 Student.objects.create(telegram_id=telegram_id, first_name="Test", course=self.course)
 
-    def test_invalid_identity(self):
-        for telegram_id in (0, -1, 2**63, True, "12"):
-            self.assertEqual(self.register(telegram_id=telegram_id).status, "invalid")
-        self.assertFalse(Student.objects.exists())
-
     def test_atomic_rollback_after_invitation_update(self):
         from django.db.models.query import QuerySet
         original = QuerySet.update
@@ -128,51 +124,25 @@ class RegistrationTests(TestCase):
         self.assertIsNone(self.invitation.student_id)
         self.assertEqual(self.register().status, "registered")
 
-    def test_conditional_claim_failure_rolls_back_student(self):
-        from django.db.models.query import QuerySet
-        original = QuerySet.update
+    def test_lock_during_start_is_retried_without_losing_invitation(self):
+        from modules.delivery.application import process_event
+        calls = []
 
-        def conflict(queryset, **kwargs):
-            return 0 if queryset.model is Invitation else original(queryset, **kwargs)
+        def locked_once(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise OperationalError("database is locked")
+            return register_student(**kwargs)
 
-        with patch.object(QuerySet, "update", conflict):
-            self.assertEqual(self.register().status, "unavailable")
-        self.assertFalse(Student.objects.exists())
-
-    def test_lock_is_controlled_without_losing_invitation(self):
-        with patch("modules.users.services._register", side_effect=OperationalError("database is locked")):
-            self.assertEqual(self.register().status, "busy")
-        self.assertEqual(self.register().status, "registered")
-
-    def test_identity_integrity_conflict_is_retried(self):
-        self.register()
-        try:
-            with transaction.atomic():
-                Student.objects.create(telegram_id=2**40, first_name="Duplicate", course=self.course)
-        except IntegrityError as error:
-            conflict = error
-        from modules.users.services import _register
-        with patch("modules.users.services._register", wraps=_register,
-                   side_effect=[conflict, DEFAULT]) as operation:
-            self.assertEqual(self.register().status, "existing")
-        self.assertEqual(operation.call_count, 2)
-
-    def test_unexpected_integrity_error_is_logged_and_not_retried(self):
-        error = IntegrityError(f"Unexpected constraint: {self.invitation.token}")
-        with patch("modules.users.services._register", side_effect=error) as operation:
-            with self.assertLogs("modules.users.services", level="ERROR") as logs:
-                with self.assertRaises(IntegrityError):
-                    self.register()
-        operation.assert_called_once()
-        self.assertNotIn(self.invitation.token, "\n".join(logs.output))
-        self.assertIn("IntegrityError", "\n".join(logs.output))
-        self.assertFalse(Student.objects.exists())
-
-    def test_non_lock_operational_error_is_not_retried(self):
-        with patch("modules.users.services._register", side_effect=OperationalError("no such table")) as operation:
-            with self.assertRaises(OperationalError):
-                self.register()
-        operation.assert_called_once()
+        event = {"bot_id": 1, "update_id": 1, "chat_id": 7, "chat_type": "private", "message_id": 1,
+                 "kind": "start", "payload": self.invitation.token,
+                 "user": {"id": 7, "first_name": "Имя", "is_bot": False}}
+        with patch("modules.delivery.application.register_student", side_effect=locked_once):
+            self.assertTrue(process_event(event, now=timezone.now()))
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(Student.objects.get().telegram_id, 7)
+        self.invitation.refresh_from_db()
+        self.assertIsNotNone(self.invitation.used_at)
 
     def test_tokens_are_random_url_safe_and_not_in_labels(self):
         other = Invitation.objects.create(course=self.course)

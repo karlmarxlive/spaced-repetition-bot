@@ -16,9 +16,6 @@ if not CSRF_TRUSTED_ORIGINS or any(
 ):
     raise ImproperlyConfigured("Задайте конкретные HTTPS DJANGO_CSRF_TRUSTED_ORIGINS")
 DATABASES["default"]["NAME"] = os.environ.get("DJANGO_DB_PATH", "/data/db.sqlite3")
-# Django Admin reads before saving inside atomic(). IMMEDIATE prevents a
-# deferred read transaction failing to upgrade to a writer under contention.
-DATABASES["default"]["OPTIONS"] = {"timeout": 20, "transaction_mode": "IMMEDIATE"}
 MEDIA_ROOT = os.environ.get("DJANGO_MEDIA_ROOT", "/data/media")
 for value in (DATABASES["default"]["NAME"], MEDIA_ROOT):
     if not Path(value).is_absolute():

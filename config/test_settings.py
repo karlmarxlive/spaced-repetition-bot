@@ -9,7 +9,8 @@ os.environ.update({
 
 from config.settings import *  # noqa: E402,F403
 
-DATABASES = {"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"}}
+DATABASES = {"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:",
+                         "OPTIONS": {"transaction_mode": "IMMEDIATE"}}}
 _media_directory = TemporaryDirectory(prefix="materials-tests-")
 MEDIA_ROOT = _media_directory.name
 PASSWORD_HASHERS = ["django.contrib.auth.hashers.MD5PasswordHasher"]

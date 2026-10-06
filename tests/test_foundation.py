@@ -17,7 +17,8 @@ from django.test import Client, TransactionTestCase
 from django.utils import timezone
 
 from bot.__main__ import main, run
-from bot.handlers import START_TEXT, create_router
+from bot.handlers import create_router
+from modules.delivery.texts import START_TEXT
 from config.environment import BASE_DIR, env_bool, load_environment
 from config.logging import SafeFormatter, log_failure
 
@@ -89,6 +90,19 @@ class FoundationTests(unittest.TestCase):
         self.assertIn("RuntimeError", output)
         self.assertIn("test_foundation.py:", output)
         self.assertNotIn(secret, output)
+
+    def test_failure_diagnostics_keep_sqlite_message_only(self):
+        import sqlite3
+        from django.db import IntegrityError
+        with self.assertLogs("review.diagnostics", level="ERROR") as logs:
+            try:
+                try:
+                    raise sqlite3.IntegrityError("UNIQUE constraint failed: users_student.telegram_id")
+                except sqlite3.IntegrityError as cause:
+                    raise IntegrityError(*cause.args) from cause
+            except IntegrityError as error:
+                log_failure(logging.getLogger("review.diagnostics"), "Failure", error)
+        self.assertIn("IntegrityError: UNIQUE constraint failed: users_student.telegram_id", "\n".join(logs.output))
 
     def test_configuration_failure_has_specific_diagnostics(self):
         with patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": TOKEN}), \

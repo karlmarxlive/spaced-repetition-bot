@@ -193,3 +193,28 @@ class ReadinessTests(TestCase):
             self.assertEqual(ready(), [])
             os.utime(Path(directory) / 'polling', (time.time() - 121,) * 2)
             self.assertIn('polling', ready())
+
+    def test_recent_rejected_update_is_reported_for_a_day(self):
+        from django.contrib.auth import get_user_model
+        from django.utils import timezone
+        from datetime import timedelta
+        from modules.delivery.models import IncomingEvent
+        get_user_model().objects.create_superuser('teacher', password='fixture')
+        with TemporaryDirectory() as directory, patch.dict(os.environ, {'APP_MANAGED': '1', 'RUNTIME_DIR': directory}):
+            (Path(directory) / 'mode').write_text('run')
+            for name in ('supervisor', 'scheduler', 'polling', 'backup'):
+                mark(name)
+            row = IncomingEvent.objects.create(bot_id=1, update_id=1, received_at=timezone.now(),
+                                               processed_at=timezone.now(), state='failed')
+            self.assertEqual(ready(), ['incoming_failed'])
+            row.processed_at = timezone.now() - timedelta(days=1, seconds=1)
+            row.save()
+            self.assertEqual(ready(), [])
+
+
+class SettingsTests(unittest.TestCase):
+    def test_every_configuration_takes_the_writer_lock_at_begin(self):
+        from django.conf import settings
+        from config import settings as base
+        self.assertEqual(base.DATABASES['default']['OPTIONS']['transaction_mode'], 'IMMEDIATE')
+        self.assertEqual(settings.DATABASES['default']['OPTIONS']['transaction_mode'], 'IMMEDIATE')

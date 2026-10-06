@@ -1,30 +1,14 @@
 """Synchronous application operations; no Telegram objects or network effects."""
 from dataclasses import dataclass
-import logging
-import re
-import sqlite3
-import time
 
 from django.core.exceptions import ValidationError
-from django.db import IntegrityError, OperationalError, transaction
-from django.db.models import F
+from django.db import transaction
 from django.utils import timezone
 
-from config.logging import log_failure
 from modules.materials.models import Topic
 from modules.users.models import Invitation, Student, StudentTopic
-from modules.repetitions.scheduling import moscow_date
-from modules.repetitions.services import _initialize_progress, require_progress
+from modules.repetitions.services import reset_progress
 from modules.study_sessions.lifecycle import cancel_assignments, reset_cursor
-
-logger = logging.getLogger(__name__)
-
-
-def _is_identity_conflict(error):
-    cause = error.__cause__
-    return (isinstance(cause, sqlite3.IntegrityError)
-            and getattr(cause, "sqlite_errorname", None) == "SQLITE_CONSTRAINT_UNIQUE"
-            and str(cause) == "UNIQUE constraint failed: users_student.telegram_id")
 
 
 @dataclass(frozen=True)
@@ -33,54 +17,19 @@ class RegistrationResult:
     student_id: int | None = None
 
 
-class InvitationUnavailable(Exception):
-    pass
-
-
-def register_student(*, telegram_id, first_name, last_name="", username="", payload=None):
-    if not isinstance(telegram_id, int) or isinstance(telegram_id, bool) or not 0 < telegram_id <= 2**63 - 1:
-        return RegistrationResult("invalid")
-    fields = {"first_name": first_name, "last_name": last_name or "", "username": username or ""}
-    if (not isinstance(first_name, str) or not first_name or len(first_name) > 64 or
-            any(not isinstance(fields[key], str) or len(fields[key]) > limit
-                for key, limit in (("last_name", 64), ("username", 32)))):
-        return RegistrationResult("invalid")
-    for attempt in range(4):
-        try:
-            return _register(telegram_id, fields, payload)
-        except InvitationUnavailable:
-            return RegistrationResult("unavailable")
-        except IntegrityError as error:
-            # Only an identity race can be resolved by re-reading the student.
-            if not _is_identity_conflict(error):
-                log_failure(logger, "Ошибка целостности данных при регистрации", error)
-                raise
-        except OperationalError as error:
-            if "locked" not in str(error).lower() and "busy" not in str(error).lower():
-                raise
-        if attempt < 3:
-            time.sleep(0.03 * (attempt + 1))
-    return RegistrationResult("busy")
-
-
 @transaction.atomic
-def _register(telegram_id, fields, payload):
-    # First statement is a write, even for an absent ID. SQLite takes the writer
-    # lock before any snapshot reads, avoiding deferred read-to-write upgrades.
+def register_student(*, telegram_id, first_name, last_name="", username="", payload=None):
+    fields = {"first_name": first_name, "last_name": last_name or "", "username": username or ""}
+    # A repeated /start refreshes the Telegram names of an existing student.
     if Student.objects.filter(telegram_id=telegram_id).update(**fields):
         return RegistrationResult("existing", Student.objects.only("pk").get(telegram_id=telegram_id).pk)
     if not payload:
         return RegistrationResult("needs_invitation")
-    if not isinstance(payload, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", payload):
-        return RegistrationResult("unavailable")
     invitation = Invitation.objects.filter(token=payload, is_revoked=False, used_at__isnull=True).first()
     if invitation is None:
         return RegistrationResult("unavailable")
     student = Student.objects.create(telegram_id=telegram_id, course_id=invitation.course_id, **fields)
-    changed = Invitation.objects.filter(pk=invitation.pk, is_revoked=False, used_at__isnull=True,
-                                        student__isnull=True).update(student=student, used_at=timezone.now())
-    if changed != 1:
-        raise InvitationUnavailable
+    Invitation.objects.filter(pk=invitation.pk).update(student=student, used_at=timezone.now())
     return RegistrationResult("registered", student.pk)
 
 
@@ -92,27 +41,23 @@ def revoke_invitation(invitation_id):
 @transaction.atomic
 def assign_topics(student_id, topic_ids, *, now):
     """Replace active selections while preserving rows and unchanged timestamps."""
-    moscow_date(now)
     selected_ids = list(topic_ids)
     if any(type(item) is not int or item <= 0 for item in selected_ids):
         raise ValidationError("ID темы должен быть положительным целым числом.")
     selected = set(selected_ids)
-    # Serialize assignments for this student; also acquire SQLite's writer lock.
-    Student.objects.filter(pk=student_id).update(display_name=F("display_name"))
     student = Student.objects.get(pk=student_id)
     allowed = set(Topic.objects.filter(pk__in=selected, course_id=student.course_id).values_list("pk", flat=True))
     if selected != allowed:
         raise ValidationError("Можно назначить только темы курса ученика.")
     assignments = {item.topic_id: item for item in StudentTopic.objects.filter(student=student)}
-    require_progress(StudentTopic.objects.filter(student=student))
     for topic_id in selected:
         existing = assignments.get(topic_id)
         if existing is None:
             existing = StudentTopic.objects.create(student=student, topic_id=topic_id, activated_at=now)
-            _initialize_progress(existing, now=now, create=True)
+            reset_progress(existing, now=now)
         elif not existing.is_active:
             StudentTopic.objects.filter(pk=existing.pk).update(is_active=True, activated_at=now)
-            _initialize_progress(existing, now=now, create=False)
+            reset_progress(existing, now=now)
             reset_cursor(existing.pk)
     disabled = StudentTopic.objects.filter(student=student, is_active=True).exclude(topic_id__in=selected)
     cancel_assignments(list(disabled.values_list("pk", flat=True)), now=now)

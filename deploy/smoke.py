@@ -88,6 +88,27 @@ def data_scenario():
     print('Production admin + answer + daily review concurrency: OK')
 
 
+def lesson_state():
+    import django
+    django.setup()
+    from modules.delivery.models import OutgoingMessage
+    from modules.repetitions.models import TopicProgress
+    from modules.study_sessions.models import Attempt, ReviewQueueItem, StudySession
+    models = [Attempt, StudySession, ReviewQueueItem, OutgoingMessage, TopicProgress]
+    return json.loads(json.dumps({m._meta.label: list(m.objects.order_by('pk').values()) for m in models},
+                                 default=str))
+
+
+def verify_state(expected):
+    """History, open lesson, queue, outbox, progress, data_scenario's course and media survive."""
+    assert lesson_state() == json.loads(Path(expected).read_text())
+    from django.conf import settings
+    from modules.materials.models import Course
+    assert Course.objects.get().title == 'After'
+    assert (Path(settings.MEDIA_ROOT) / 'fixture.txt').read_text() == 'persisted across containers'
+    print('History, open lesson, queue, progress, outbox and media: OK')
+
+
 def main():
     # Reserve/check the production port before creating data or starting processes.
     with socket.socket() as listener:
@@ -153,5 +174,9 @@ def main():
 if __name__ == '__main__':
     if '--data' in sys.argv:
         data_scenario()
+    elif '--save-state' in sys.argv:
+        Path(sys.argv[-1]).write_text(json.dumps(lesson_state()))
+    elif '--verify-state' in sys.argv:
+        verify_state(sys.argv[-1])
     else:
         main()

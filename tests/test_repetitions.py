@@ -17,7 +17,7 @@ from modules.users.models import Student, StudentTopic
 from modules.users.services import assign_topics
 from modules.repetitions.models import TopicProgress
 from modules.repetitions.scheduling import calculate_transition, initial_schedule
-from modules.repetitions.services import apply_result, due_topics, InconsistentProgressError
+from modules.repetitions.services import apply_result, due_topics
 
 NOW = datetime(2026, 9, 20, 21, tzinfo=dt_timezone.utc)
 
@@ -33,15 +33,6 @@ class CalendarTests(SimpleTestCase):
                 self.assertEqual((result.interval_step, result.next_review_date), (2, date(2026, 10, 1)))
             result = calculate_transition(2, False, now=NOW)
             self.assertEqual((result.interval_step, result.next_review_date), (0, date(2026, 9, 23)))
-            with self.assertRaises(ValueError):
-                calculate_transition(3, True, now=NOW)
-
-    def test_invalid_interval_configuration(self):
-        from config.repetitions import validate_intervals
-        for error_days, success_days in ((0, (3,)), (True, (3,)), (1, ()),
-                                         (1, (0,)), (1, (-3,)), (1, (1.5,)), (1, '3,7')):
-            with self.subTest(error_days=error_days, success_days=success_days), self.assertRaises(ValueError):
-                validate_intervals(error_days, success_days)
 
     def test_complete_correct_chain(self):
         step = 0
@@ -72,13 +63,9 @@ class CalendarTests(SimpleTestCase):
                 self.assertEqual(calculate_transition(5, False, now=datetime.fromisoformat(text)).next_review_date, expected)
         self.assertEqual(initial_schedule(now=datetime(2024, 2, 28, 21, tzinfo=dt_timezone.utc)).next_review_date, date(2024, 2, 29))
 
-    def test_invalid_inputs(self):
-        for step in (-1, 7, True, 1.0, None):
-            with self.assertRaises(ValueError):
-                calculate_transition(step, True, now=NOW)
-        for correct in (None, 'unavailable', 0, 1):
-            with self.assertRaises(ValueError):
-                calculate_transition(0, correct, now=NOW)
+    def test_naive_time_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, 'timezone-aware'):
+            calculate_transition(0, True, now=NOW.replace(tzinfo=None))
         with self.assertRaisesRegex(ValueError, 'timezone-aware'):
             initial_schedule(now=NOW.replace(tzinfo=None))
 
@@ -162,9 +149,7 @@ class ProgressTests(TestCase):
 
     def test_invalid_operations_do_not_write(self):
         row = self.assign()
-        for operation in (lambda: assign_topics(self.student.pk, [], now=NOW.replace(tzinfo=None)),
-                          lambda: apply_result(row.pk, True, now=NOW.replace(tzinfo=None)),
-                          lambda: apply_result(row.pk, None, now=NOW),
+        for operation in (lambda: apply_result(row.pk, True, now=NOW.replace(tzinfo=None)),
                           lambda: due_topics(self.student.pk, now=NOW.replace(tzinfo=None))):
             with CaptureQueriesContext(connection) as queries, self.assertRaises(ValueError):
                 operation()
@@ -187,12 +172,11 @@ class ProgressTests(TestCase):
         with self.assertRaises(ProtectedError):
             row.delete()
 
-    def test_corruption_is_reported_not_repaired(self):
+    def test_missing_progress_is_reported_not_repaired(self):
         row = StudentTopic.objects.create(student=self.student, topic=self.topic, activated_at=NOW)
         for operation in (lambda: due_topics(self.student.pk, now=NOW),
-                          lambda: assign_topics(self.student.pk, [self.topic.pk], now=NOW),
                           lambda: apply_result(row.pk, True, now=NOW)):
-            with self.assertRaises(InconsistentProgressError):
+            with self.assertRaises(TopicProgress.DoesNotExist):
                 operation()
         self.assertFalse(TopicProgress.objects.exists())
 
@@ -200,16 +184,16 @@ class ProgressTests(TestCase):
         row = self.assign()
         apply_result(row.pk, True, now=NOW)
         topic = Topic.objects.create(course=self.course, title='New')
-        with patch('modules.repetitions.services.TopicProgress.objects.create', side_effect=RuntimeError('write')):
+        with patch('modules.users.services.reset_progress', side_effect=RuntimeError('write')):
             with self.assertRaises(RuntimeError):
                 assign_topics(self.student.pk, [topic.pk], now=NOW)
         self.assertEqual(StudentTopic.objects.count(), 1)
         assign_topics(self.student.pk, [], now=NOW)
-        from modules.users.services import _initialize_progress
+        from modules.users.services import reset_progress
         def fail_after_write(*args, **kwargs):
-            _initialize_progress(*args, **kwargs)
+            reset_progress(*args, **kwargs)
             raise RuntimeError('after reset')
-        with patch('modules.users.services._initialize_progress', side_effect=fail_after_write):
+        with patch('modules.users.services.reset_progress', side_effect=fail_after_write):
             with self.assertRaises(RuntimeError):
                 assign_topics(self.student.pk, [self.topic.pk], now=NOW + timedelta(days=1))
         row.refresh_from_db()

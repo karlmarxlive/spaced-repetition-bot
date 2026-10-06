@@ -11,7 +11,7 @@ from django.shortcuts import get_object_or_404
 from django.template.response import TemplateResponse
 from django.urls import reverse
 
-from config.repetitions import SUCCESS_INTERVAL_DAYS
+from config.repetitions import ERROR_RETRY_DAYS, SUCCESS_INTERVAL_DAYS
 from modules.delivery.models import OutgoingMessage, QuestionDelivery
 from modules.repetitions.scheduling import MOSCOW
 from modules.study_sessions.models import Attempt
@@ -46,8 +46,8 @@ def statistics(model_admin, request, student_id):
     assignments = list(student.topic_assignments.select_related('topic', 'progress').order_by('topic__order', 'pk'))
     for assignment in assignments:
         step = assignment.progress.interval_step
-        assignment.interval_label = ('Ступень 0: первое повторение / после ошибки — следующий день' if step == 0
-                                     else f'{SUCCESS_INTERVAL_DAYS[step - 1]} дней')
+        assignment.interval_label = (f'Ступень 0: первое повторение / после ошибки — {ERROR_RETRY_DAYS} дн.'
+                                     if step == 0 else f'{SUCCESS_INTERVAL_DAYS[step - 1]} дн.')
     attempts = Attempt.objects.filter(student=student).select_related('assignment__topic')
     topic = request.GET.get('topic', '')
     if topic:
@@ -74,7 +74,7 @@ def statistics(model_admin, request, student_id):
     query = request.GET.copy()
     query.pop('page', None)
     context = dict(model_admin.admin_site.each_context(request), title=f'Учебная статистика: {student}',
-        student=student, assignments=assignments, history=history, outgoing=outgoing, counts=counts,
+        student=student, assignments=assignments, last_interval=SUCCESS_INTERVAL_DAYS[-1], history=history, outgoing=outgoing, counts=counts,
         filters=request.GET, page_query=query.urlencode(), current=Attempt.objects.filter(student=student, status='open').first(),
         delivery=QuestionDelivery.objects.filter(attempt__student=student, attempt__status='open').first())
     return TemplateResponse(request, 'admin/users/student_statistics.html', context)

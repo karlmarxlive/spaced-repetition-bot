@@ -37,7 +37,7 @@ def age(name):
 def ready():
     from django.db import connection
     from django.utils import timezone
-    from modules.delivery.models import OutgoingMessage
+    from modules.delivery.models import IncomingEvent, OutgoingMessage
     from datetime import timedelta
     from django.contrib.auth import get_user_model
     issues = []
@@ -64,6 +64,8 @@ def ready():
             issues.append('outbox')
         if OutgoingMessage.objects.filter(state='failed').exists():
             issues.append('outbox_failed')
+        if IncomingEvent.objects.filter(state='failed', processed_at__gte=timezone.now() - timedelta(days=1)).exists():
+            issues.append('incoming_failed')
     return issues
 
 

@@ -17,6 +17,7 @@ from django.utils import timezone
 
 from modules.delivery.models import OutgoingMessage, QuestionDelivery
 from modules.delivery.services import text_parts
+from modules.delivery.texts import summary_text
 from modules.study_sessions.models import Attempt
 
 LEASE_SECONDS = 60
@@ -71,13 +72,7 @@ def enqueue_review(review, *, bot_id, chat_id, student_id, operation, now, manua
         for attachment in question.attachments:
             enqueue_part(kind='document', path=attachment.path, filename=attachment.name, **common)
     if review.summary:
-        summary = review.summary
-        prefix = 'Занятие завершено.' if summary.correct + summary.incorrect else 'Заданий для ответа сейчас нет.'
-        text = (f'{prefix} Ответов: {summary.correct + summary.incorrect}; '
-                f'верных: {summary.correct}; неверных: {summary.incorrect}.')
-        if summary.skipped or summary.cancelled:
-            text += f' Пропущено тем: {summary.skipped}; отменено: {summary.cancelled}.'
-        enqueue_text(text=text, **common)
+        enqueue_text(text=summary_text(review.summary), **common)
 
 
 def cancel_stale(bot_id, chat_id=None):
@@ -144,7 +139,7 @@ def classify(error, attempts):
         return 'rate_limit', max(1, error.retry_after)
     if isinstance(error, TelegramForbiddenError):
         return 'chat_unavailable', None
-    if isinstance(error, (FileNotFoundError, ValueError)):
+    if isinstance(error, FileNotFoundError):
         return 'attachment', None
     if isinstance(error, TelegramBadRequest):
         return 'telegram_request', None

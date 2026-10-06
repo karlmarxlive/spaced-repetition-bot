@@ -268,6 +268,34 @@ class SchedulerDeliveryTests(DailyFixture, TransactionTestCase):
         self.assertEqual(await sync_to_async(DailyReviewRun.objects.count)(), 1)
         self.assertEqual(await sync_to_async(ReviewQueueItem.objects.count)(), 2)
 
+    async def test_failed_student_is_retried_after_pause_and_stays_reported(self):
+        from modules.delivery.application import daily_review
+        bot = type('FakeBot', (), {'id': 123456789})()
+        retry_at = {}
+        with patch('modules.delivery.scheduler.drain', new_callable=AsyncMock), \
+                patch('modules.delivery.scheduler.daily_review', side_effect=RuntimeError('bug')) as form, \
+                patch('modules.delivery.scheduler.fail_once') as fail_once, \
+                self.assertLogs('modules.delivery.scheduler', level='ERROR') as logs:
+            await run_tick(bot, now=NOW, retry_at=retry_at)
+            await run_tick(bot, now=NOW + timedelta(seconds=2), retry_at=retry_at)
+        self.assertEqual((form.call_count, len(logs.output)), (1, 1))
+        self.assertEqual(fail_once.call_count, 2)
+        with patch('modules.delivery.scheduler.drain', new_callable=AsyncMock), \
+                patch('modules.delivery.scheduler.daily_review', wraps=daily_review), \
+                patch('modules.delivery.scheduler.clear') as clear:
+            self.assertEqual(await run_tick(bot, now=NOW + timedelta(seconds=60), retry_at=retry_at), 1)
+        self.assertEqual(retry_at, {})
+        clear.assert_called_once_with('scheduler-error')
+
+    async def test_retry_state_is_dropped_for_students_no_longer_due(self):
+        bot = type('FakeBot', (), {'id': 123456789})()
+        retry_at = {self.student.pk: NOW + timedelta(hours=1)}
+        with patch('modules.delivery.scheduler.drain', new_callable=AsyncMock), \
+                patch('modules.delivery.scheduler.clear') as clear:
+            await run_tick(bot, now=NOW - timedelta(hours=1), retry_at=retry_at)
+        self.assertEqual(retry_at, {})
+        clear.assert_called_once_with('scheduler-error')
+
 
 class SchedulerCommandTests(TestCase):
     def test_missing_token(self):

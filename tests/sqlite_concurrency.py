@@ -26,7 +26,7 @@ def main():
         path = str(Path(directory) / "test.sqlite3")
         connection = connections["default"]
         connection.settings_dict["NAME"] = path
-        connection.settings_dict["OPTIONS"] = {"timeout": 0.05}
+        connection.settings_dict["OPTIONS"] = {"timeout": 5, "transaction_mode": "IMMEDIATE"}
         call_command("migrate", verbosity=0)
         course = Course.objects.create(title="Concurrency")
 
@@ -66,13 +66,20 @@ def main():
 
         # Actual SQLite lock, not a mocked OperationalError; no lost invitation.
         invitation = Invitation.objects.create(course=course)
+        connection.settings_dict["OPTIONS"] = {"timeout": 0.05, "transaction_mode": "IMMEDIATE"}
+        connection.close()
         with closing(sqlite3.connect(path, timeout=0.05)) as locker:
             locker.execute("BEGIN IMMEDIATE")
             try:
-                result = register_student(telegram_id=5, first_name="Test", payload=invitation.token)
-                assert result.status == "busy", result
+                register_student(telegram_id=5, first_name="Test", payload=invitation.token)
+            except OperationalError as error:
+                assert "locked" in str(error).lower()
+            else:
+                raise AssertionError("Expected a real SQLite lock failure")
             finally:
                 locker.rollback()
+        connection.settings_dict["OPTIONS"] = {"timeout": 5, "transaction_mode": "IMMEDIATE"}
+        connection.close()
         invitation.refresh_from_db()
         assert invitation.used_at is None
         assert not Student.objects.filter(telegram_id=5).exists()
@@ -106,7 +113,7 @@ def main():
         topic = Topic.objects.create(course=course, title="Repeat")
         assign_topics(student.pk, [topic.pk], now=now)
         assignment = student.topic_assignments.get()
-        connection.settings_dict["OPTIONS"] = {"timeout": 5}
+        connection.settings_dict["OPTIONS"] = {"timeout": 5, "transaction_mode": "IMMEDIATE"}
         connection.close()
         barrier = Barrier(2)
 
@@ -136,7 +143,7 @@ def main():
             list(pool.map(answer_or_assign, [True, False]))
         assert TopicProgress.objects.get(assignment=assignment).interval_step == 3
 
-        connection.settings_dict["OPTIONS"] = {"timeout": 0.05}
+        connection.settings_dict["OPTIONS"] = {"timeout": 0.05, "transaction_mode": "IMMEDIATE"}
         connection.close()
         with closing(sqlite3.connect(path, timeout=0.05)) as locker:
             locker.execute("BEGIN IMMEDIATE")
@@ -157,7 +164,7 @@ def main():
         assert apply_result(assignment.pk, False, now=now).interval_step == 0
 
         # Two independent scheduler/manual writers share a persisted queue.
-        connection.settings_dict["OPTIONS"] = {"timeout": 5}
+        connection.settings_dict["OPTIONS"] = {"timeout": 5, "transaction_mode": "IMMEDIATE"}
         connection.close()
         student = Student.objects.create(course=course, telegram_id=20, first_name="Daily")
         topics = [Topic.objects.create(course=course, title=f"Daily {i}", order=i) for i in range(2)]

@@ -5,7 +5,7 @@
 <table><thead><tr><th>Тема</th><th>Активна</th><th>Ступень</th><th>Интервал</th><th>Следующая дата</th></tr></thead><tbody>
 {% for a in assignments %}<tr><td>{{ a.topic.title }}</td><td>{{ a.is_active|yesno:"Да,Нет" }}</td><td>{{ a.progress.interval_step }}</td><td>{{ a.interval_label }}</td><td>{{ a.progress.next_review_date }}{% if not a.is_active %} (выдача отключена){% endif %}</td></tr>{% endfor %}
 </tbody></table>
-<p>Максимальная ступень продолжает повторения через 60 дней.</p>
+<p>Максимальная ступень продолжает повторения через {{ last_interval }} дн.</p>
 <h2>История попыток</h2>
 <form method="get">
 <label>Исходная тема <select name="topic"><option value="">Все темы этого ученика</option>{% for a in assignments %}<option value="{{ a.topic_id }}" {% if filters.topic == a.topic_id|stringformat:"s" %}selected{% endif %}>{{ a.topic.title }}</option>{% endfor %}</select></label>

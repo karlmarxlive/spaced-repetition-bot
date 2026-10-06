@@ -35,7 +35,7 @@ def main():
         path = Path(directory) / 'isolated.sqlite3'
         connection.close()
         connection.settings_dict['NAME'] = str(path)
-        connection.settings_dict['OPTIONS'] = {'timeout': 2}
+        connection.settings_dict['OPTIONS'] = {'timeout': 2, 'transaction_mode': 'IMMEDIATE'}
         try:
             # Start at the actual stage-6 schema, with a repeated topic in a long session.
             executor = MigrationExecutor(connection)
@@ -160,7 +160,7 @@ def main():
             current = Attempt.objects.get(student=student, status='open')
             assert OutgoingMessage.objects.filter(attempt=current, is_question=True).count() == 2
             # Real SQLite lock retries the entire operation; no partial journal/progress.
-            connection.settings_dict['OPTIONS'] = {'timeout': 0.01}
+            connection.settings_dict['OPTIONS'] = {'timeout': 0.01, 'transaction_mode': 'IMMEDIATE'}
             connection.close()
             with closing(sqlite3.connect(path)) as locker:
                 locker.execute('BEGIN IMMEDIATE')
