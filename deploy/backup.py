@@ -9,6 +9,7 @@ import sqlite3
 import subprocess
 import tarfile
 import tempfile
+from contextlib import closing
 from datetime import datetime, timezone
 
 
@@ -24,7 +25,10 @@ def create_backup(db, media, directory, *, export=True):
     archive = directory / f'{name}.tar.gz'
     with tempfile.TemporaryDirectory(dir=directory) as work:
         work = Path(work)
-        with sqlite3.connect(db) as source, sqlite3.connect(work / 'db.sqlite3') as target:
+        # SQLite's connection context manager commits/rolls back but does not
+        # close the handle. On NFS an open snapshot becomes a busy .nfs file
+        # when TemporaryDirectory tries to remove it during restart.
+        with closing(sqlite3.connect(db)) as source, closing(sqlite3.connect(work / 'db.sqlite3')) as target:
             source.backup(target)
             if target.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
                 raise RuntimeError('Backup integrity check failed')
@@ -82,7 +86,7 @@ def restore(archive, db, media):
                   for p in work.rglob('*') if p.is_file() and p.relative_to(work) != Path('manifest.json')}
         if actual != manifest['files']:
             raise RuntimeError('Backup checksum mismatch')
-        with sqlite3.connect(work / 'db.sqlite3') as connection:
+        with closing(sqlite3.connect(work / 'db.sqlite3')) as connection:
             if connection.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
                 raise RuntimeError('Restore integrity check failed')
         media.mkdir(parents=True, exist_ok=True)

@@ -17,6 +17,31 @@ from deploy.supervisor import stop_children, supervise
 
 
 class BackupTests(unittest.TestCase):
+    def test_snapshot_connections_are_closed_before_temporary_cleanup(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / 'media'
+            media.mkdir()
+            db = root / 'db.sqlite3'
+            with sqlite3.connect(db) as connection:
+                connection.execute('CREATE TABLE lesson (id INTEGER)')
+            connection.close()
+            handles = []
+            connect = sqlite3.connect
+
+            def tracked_connect(*args, **kwargs):
+                handle = connect(*args, **kwargs)
+                handles.append(handle)
+                return handle
+
+            with patch('deploy.backup.sqlite3.connect', side_effect=tracked_connect):
+                archive = create_backup(db, media, root / 'backups', export=False)
+                restore(archive, root / 'restored/db.sqlite3', root / 'restored/media')
+            self.assertEqual(len(handles), 3)
+            for handle in handles:
+                with self.assertRaises(sqlite3.ProgrammingError):
+                    handle.execute('SELECT 1')
+
     def test_snapshot_restore_checksums_retention_and_external_copy(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

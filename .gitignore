@@ -18,6 +18,7 @@ htmlcov/
 .ruff_cache/
 .vscode/
 .idea/
+.playwriter*
 *.egg-info/
 build/
 dist/
