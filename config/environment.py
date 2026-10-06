@@ -7,6 +7,8 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 
 def load_environment(path=BASE_DIR / ".env"):
+    if os.environ.get("DJANGO_SETTINGS_MODULE") in {"config.production", "config.build"}:
+        return
     # Interpolation disabled: values are literal, including dollar signs in secrets.
     load_dotenv(path, override=False, interpolate=False)
 

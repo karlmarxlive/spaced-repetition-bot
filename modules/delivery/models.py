@@ -1,5 +1,6 @@
 """Durable transport state; no references or raw Telegram updates in payloads."""
 from django.db import models
+from django.utils import timezone
 
 
 class IncomingEvent(models.Model):
@@ -26,6 +27,7 @@ class QuestionDelivery(models.Model):
 
 
 class OutgoingMessage(models.Model):
+    created_at = models.DateTimeField(default=timezone.now)
     bot_id = models.PositiveBigIntegerField()
     chat_id = models.BigIntegerField()
     student = models.ForeignKey('users.Student', null=True, on_delete=models.PROTECT)

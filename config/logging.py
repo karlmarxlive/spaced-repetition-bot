@@ -17,7 +17,7 @@ class SafeFormatter(logging.Formatter):
     def format(self, record):
         output = super().format(record)
         output = re.sub(r"https?://[^\s]*api\.telegram\.org[^\s]*", "[TELEGRAM_URL]", output)
-        for name in ("TELEGRAM_BOT_TOKEN", "DJANGO_SECRET_KEY"):
+        for name in ("TELEGRAM_BOT_TOKEN", "DJANGO_SECRET_KEY", "BACKUP_EXPORT_TOKEN", "BACKUP_EXPORT_URL"):
             secret = os.environ.get(name)
             if secret:
                 output = output.replace(secret, "[REDACTED]")

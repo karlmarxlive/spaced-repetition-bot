@@ -9,6 +9,7 @@ from django.db import close_old_connections
 from django.utils import timezone
 
 from config.logging import log_failure
+from deploy.health import mark, fail_once, clear
 from modules.delivery.application import daily_review
 from modules.delivery.outbox import drain
 from modules.repetitions.scheduling import MOSCOW, moscow_date
@@ -35,12 +36,18 @@ def _form(student_id, now, bot_id):
 async def run_tick(bot, *, now, live_delivery=False):
     """Form daily state and independently recover pending delivery on every tick."""
     formed = 0
+    failed = False
     for student_id, telegram_id in await sync_to_async(_candidates, thread_sensitive=True)(now):
         try:
             formed += await sync_to_async(_form, thread_sensitive=True)(student_id, now, bot.id)
         except Exception as error:
+            failed = True
             log_failure(logger, f"Ошибка ежедневной выдачи ученику {student_id}", error)
     await drain(bot, now=None if live_delivery else now)
+    if failed:
+        fail_once("scheduler-error")
+    else:
+        clear("scheduler-error")
     return formed
 
 
@@ -48,9 +55,11 @@ async def run_scheduler(bot, *, once=False):
     while True:
         try:
             await run_tick(bot, now=timezone.now(), live_delivery=True)
+            mark("scheduler")
         except TelegramUnauthorizedError:
             raise
         except Exception as error:
+            fail_once("scheduler-error")
             log_failure(logger, "Ошибка прохода планировщика", error)
             if once:
                 raise

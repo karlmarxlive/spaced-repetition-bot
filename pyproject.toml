@@ -3,4 +3,4 @@ name = "spaced-repetition-bot"
 version = "0.1.0"
 description = "Локальный Telegram-бот для подготовки к ЕГЭ по информатике"
 requires-python = ">=3.14,<3.15"
-dependencies = ["Django==5.2.17", "aiogram==3.31.0", "python-dotenv==1.2.3"]
+dependencies = ["Django==5.2.17", "aiogram==3.31.0", "python-dotenv==1.2.3", "gunicorn==26.2.0", "whitenoise==6.12.0"]

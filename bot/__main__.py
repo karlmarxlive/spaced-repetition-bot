@@ -24,6 +24,16 @@ async def run(token, check=False):
             await bot.get_me()
             logger.info("getMe: подключение к Telegram успешно")
             return
+        from aiogram.methods import GetUpdates
+        from deploy.health import mark
+
+        async def activity(make_request, bot, method):
+            result = await make_request(bot, method)
+            if isinstance(method, GetUpdates):
+                mark("polling")
+            return result
+
+        session.middleware(activity)
         dispatcher = Dispatcher()
         from bot.handlers import create_router
 
